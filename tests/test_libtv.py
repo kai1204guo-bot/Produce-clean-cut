@@ -8,7 +8,7 @@ from unittest import TestCase
 from unittest.mock import patch
 
 from clean_cut.errors import MediaProcessError
-from clean_cut.libtv import LibTvClient
+from clean_cut.libtv import LibTvClient, detect_opening_cover_frames
 
 
 class FakeLibTvClient(LibTvClient):
@@ -100,3 +100,33 @@ class LibTvClientTests(TestCase):
         with patch.object(client, "_run_json", return_value=json.loads("{}")):
             with self.assertRaisesRegex(MediaProcessError, "缺少 nodeKey"):
                 client.upload_video(Path("video.mp4"), "project", "video")
+
+    def test_detects_cover_at_first_strong_opening_cut(self) -> None:
+        output = """frame:0 pts:0 pts_time:0
+lavfi.scene_score=0.000000
+frame:1 pts:1 pts_time:0.033333
+lavfi.scene_score=0.000214
+frame:2 pts:2 pts_time:0.066667
+lavfi.scene_score=0.000041
+frame:3 pts:3 pts_time:0.1
+lavfi.scene_score=0.532158
+"""
+        completed = subprocess.CompletedProcess(args=[], returncode=0, stdout=output, stderr="")
+        with (
+            patch("clean_cut.libtv.require_tool", return_value="ffmpeg"),
+            patch("clean_cut.libtv.subprocess.run", return_value=completed),
+        ):
+            self.assertEqual(detect_opening_cover_frames(Path("video.mp4")), 3)
+
+    def test_cover_detection_falls_back_to_two_frames(self) -> None:
+        output = """frame:0 pts:0 pts_time:0
+lavfi.scene_score=0.000000
+frame:1 pts:1 pts_time:0.033333
+lavfi.scene_score=0.010000
+"""
+        completed = subprocess.CompletedProcess(args=[], returncode=0, stdout=output, stderr="")
+        with (
+            patch("clean_cut.libtv.require_tool", return_value="ffmpeg"),
+            patch("clean_cut.libtv.subprocess.run", return_value=completed),
+        ):
+            self.assertEqual(detect_opening_cover_frames(Path("video.mp4")), 2)

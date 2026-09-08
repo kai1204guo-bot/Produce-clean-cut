@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -11,6 +13,7 @@ from uuid import uuid4
 
 from clean_cut.errors import MediaProcessError, ToolNotFoundError
 from clean_cut.media import probe_media
+from clean_cut.tools import require_tool, run_command
 
 SUBTITLE_ERASER_MODEL = "volcano-subtitle-eraser"
 SUBTITLE_ERASER_GENERATOR = "subtitle_erase"
@@ -25,6 +28,7 @@ class LibTvRepairResult:
     template_node: str
     uploaded_node: str
     task_id: str | None
+    preserved_cover_frames: int
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -191,6 +195,121 @@ class LibTvClient:
         return destination
 
 
+def detect_opening_cover_frames(
+    source: Path,
+    *,
+    scan_frames: int = 15,
+    scene_threshold: float = 0.3,
+    fallback_frames: int = 2,
+) -> int:
+    """Detect a short opening cover ending at a strong cut in the first frames."""
+    ffmpeg = require_tool("ffmpeg")
+    result = subprocess.run(
+        [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            str(source.resolve()),
+            "-vf",
+            "select='gte(scene,0)',metadata=print:file=-",
+            "-frames:v",
+            str(scan_frames),
+            "-an",
+            "-f",
+            "null",
+            os.devnull,
+        ],
+        capture_output=True,
+        check=False,
+        encoding="utf-8",
+        errors="replace",
+        text=True,
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or "未返回错误详情"
+        raise MediaProcessError(f"检测片头封面失败：{detail}")
+
+    current_frame: int | None = None
+    for line in result.stdout.splitlines():
+        frame_match = re.search(r"\bframe:(\d+)", line)
+        if frame_match:
+            current_frame = int(frame_match.group(1))
+            continue
+        score_match = re.search(r"lavfi\.scene_score=([0-9.]+)", line)
+        if score_match and current_frame is not None:
+            if current_frame > 0 and float(score_match.group(1)) >= scene_threshold:
+                return current_frame
+    return fallback_frames
+
+
+def restore_opening_cover_frames(
+    source: Path,
+    repaired: Path,
+    destination: Path,
+    *,
+    frame_count: int,
+    crf: int = 16,
+) -> Path:
+    destination = destination.resolve()
+    if frame_count < 0:
+        raise ValueError("封面保护帧数不能小于 0。")
+    if destination.exists():
+        raise MediaProcessError(f"输出文件已存在，未执行覆盖：{destination}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if frame_count == 0:
+        shutil.move(str(repaired.resolve()), destination)
+        return destination
+
+    ffmpeg = require_tool("ffmpeg")
+    temporary = destination.with_name(f".{destination.stem}.{uuid4().hex}.tmp{destination.suffix}")
+    filter_graph = (
+        f"[1:v]trim=end_frame={frame_count},setpts=PTS-STARTPTS[cover];"
+        "[0:v]setpts=PTS-STARTPTS[clean];"
+        "[clean][cover]overlay=eof_action=pass:repeatlast=0[video]"
+    )
+    try:
+        run_command(
+            [
+                ffmpeg,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-i",
+                str(repaired.resolve()),
+                "-i",
+                str(source.resolve()),
+                "-filter_complex",
+                filter_graph,
+                "-map",
+                "[video]",
+                "-map",
+                "0:a?",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "medium",
+                "-crf",
+                str(crf),
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "copy",
+                "-movflags",
+                "+faststart",
+                str(temporary),
+            ],
+            description="恢复片头封面",
+            expected_output=temporary,
+        )
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return destination
+
+
 def repair_with_libtv(
     source: Path,
     output: Path,
@@ -198,6 +317,7 @@ def repair_with_libtv(
     project_uuid: str,
     template_node: str,
     executable: str | Path | None = None,
+    cover_frames: int | None = None,
 ) -> LibTvRepairResult:
     source = source.resolve()
     output = output.resolve()
@@ -214,6 +334,12 @@ def repair_with_libtv(
         raise MediaProcessError(f"LibTV 智能去字幕不支持该格式；支持：{supported}")
     if output.exists():
         raise MediaProcessError(f"输出文件已存在，未执行覆盖：{output}")
+    if cover_frames is not None and cover_frames < 0:
+        raise ValueError("封面保护帧数不能小于 0。")
+    preserved_cover_frames = (
+        detect_opening_cover_frames(source) if cover_frames is None else cover_frames
+    )
+    output.parent.mkdir(parents=True, exist_ok=True)
 
     client = LibTvClient(executable)
     template_key = client.validate_subtitle_template(project_uuid, template_node)
@@ -224,7 +350,15 @@ def repair_with_libtv(
     task_info = data.get("taskInfo") or {}
     if task_info.get("status") != 2 or not data.get("url"):
         raise MediaProcessError("LibTV 智能去字幕未返回成功终态或下载地址。")
-    client.download_node(project_uuid, template_key, output)
+    with tempfile.TemporaryDirectory(prefix=".libtv-raw-", dir=output.parent) as temporary:
+        raw_output = Path(temporary) / "libtv-clean.mp4"
+        client.download_node(project_uuid, template_key, raw_output)
+        restore_opening_cover_frames(
+            source,
+            raw_output,
+            output,
+            frame_count=preserved_cover_frames,
+        )
     task_id = task_info.get("taskId")
     return LibTvRepairResult(
         source=source,
@@ -233,4 +367,5 @@ def repair_with_libtv(
         template_node=template_key,
         uploaded_node=uploaded_node,
         task_id=str(task_id) if task_id is not None else None,
+        preserved_cover_frames=preserved_cover_frames,
     )

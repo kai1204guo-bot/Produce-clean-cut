@@ -137,6 +137,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="可选的 libtv CLI 路径；默认从 PATH 或 ~/.libtv/libtv.exe 查找",
     )
+    libtv_parser.add_argument(
+        "--cover-frames",
+        type=int,
+        help="保护原片开头多少帧；默认自动检测，0 表示关闭",
+    )
 
     libtv_process_parser = subparsers.add_parser(
         "libtv-process",
@@ -149,6 +154,11 @@ def build_parser() -> argparse.ArgumentParser:
     libtv_process_parser.add_argument("--region", type=_parse_region, required=True)
     libtv_process_parser.add_argument("--interval-ms", type=int, default=250)
     libtv_process_parser.add_argument("--libtv-executable", type=Path)
+    libtv_process_parser.add_argument(
+        "--cover-frames",
+        type=int,
+        help="保护原片开头多少帧；默认自动检测，0 表示关闭",
+    )
     return parser
 
 
@@ -289,12 +299,13 @@ def main(argv: list[str] | None = None) -> int:
                 project_uuid=args.project,
                 template_node=args.template_node,
                 executable=args.libtv_executable,
+                cover_frames=args.cover_frames,
             ).to_dict()
         else:
             output_dir = args.output_dir.resolve()
             output_dir.mkdir(parents=True, exist_ok=True)
             stem = args.source.stem.rstrip(" .") or "video"
-            clean_output = output_dir / f"{stem}_libtv_clean.mp4"
+            clean_output = output_dir / f"{stem}-清水版.mp4"
             planned_outputs = [
                 output_dir / f"{stem}.srt",
                 output_dir / f"{stem}_hard_subtitle_plan.json",
@@ -317,6 +328,7 @@ def main(argv: list[str] | None = None) -> int:
                 project_uuid=args.project,
                 template_node=args.template_node,
                 executable=args.libtv_executable,
+                cover_frames=args.cover_frames,
             )
             result = {
                 "status": "completed",
