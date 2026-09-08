@@ -9,6 +9,7 @@
 - 将文本软字幕转换为 SRT；
 - 无重编码移除所有软字幕轨道；
 - 使用 RapidOCR 分析用户指定区域内的硬字幕；
+- 使用 Faster-Whisper 从视频音频批量生成 SRT，避免把画面标题和警戒带等文字误识别成对白；
 - 将跨帧OCR结果合并为字幕轨迹，过滤异常大框和低证据单字符噪声；
 - 从同一轮OCR生成SRT和逐帧多边形遮罩计划；
 - 将遮罩扩张、羽化，并为字幕淡入淡出增加前后保持；
@@ -30,7 +31,7 @@
 
 ## 开发运行
 
-基础媒体分析无需第三方 Python 依赖。硬字幕分析需要安装 OCR 可选依赖。
+基础媒体分析无需第三方 Python 依赖。硬字幕分析需要安装 OCR 可选依赖；只生成对白 SRT 时优先使用 ASR 可选依赖。
 项目位于中文路径时，开发环境使用 `--no-install-project`，避免 Windows 可编辑安装路径的编码问题：
 
 ```powershell
@@ -38,6 +39,7 @@ uv sync --python 3.11 --extra ocr --extra repair --extra dev --no-install-projec
 $env:PYTHONPATH = "src"
 python -m clean_cut inspect "input.mp4"
 python -m clean_cut process "input.mkv" --output-dir "output"
+python -m clean_cut asr-batch "input-directory" --output-dir "srt" --model turbo --device cuda --cuda-dll-dir ".venv/Lib/site-packages/torch/lib"
 python -m clean_cut analyze-hard "input.mp4" --region "0,700,1920,300" --output-dir "output"
 python -m clean_cut repair "input.mp4" --plan "output/input_hard_subtitle_plan.json" --output "output/input.clean.mp4"
 python -m clean_cut detect-scenes "input.mp4"
@@ -47,6 +49,22 @@ python -m clean_cut evaluate "input.mp4" --repaired "output/input.clean.mp4" --p
 `inspect` 只分析媒体；`process` 会根据字幕类型执行当前阶段支持的安全处理。文本软字幕将被提取为 SRT，同时生成移除字幕轨道后的清水视频。
 
 `analyze-hard` 按指定字幕区域抽帧并运行 RapidOCR，输出 SRT 和硬字幕计划 JSON。计划中的OCR文字轨迹与逐帧多边形遮罩来自同一轮识别，可供后续视频修复直接使用。
+
+## 批量语音字幕
+
+视频对白字幕应优先从音频识别。`asr-batch` 会按剧集编号顺序处理目录内所有 MP4，并输出同名 SRT。NVIDIA 显卡建议使用 `turbo`、CUDA 和 `float16`；Windows 上若 CTranslate2 找不到 CUDA 12/cuDNN 9 DLL，可通过 `--cuda-dll-dir` 指向 PyTorch 的 `torch/lib` 目录。输出文件已存在时不会覆盖，避免误删人工校对结果。
+
+```powershell
+uv sync --python 3.11 --extra asr --extra dev --no-install-project
+$env:PYTHONPATH = "src"
+python -m clean_cut asr-batch "F:/videos" `
+  --output-dir "F:/videos/srt" `
+  --model turbo `
+  --device cuda `
+  --cuda-dll-dir ".venv/Lib/site-packages/torch/lib"
+```
+
+OCR 仍用于定位画面中的硬字幕遮罩。画面内存在招牌、封面标题或警戒带时，缩小 `--region` 并使用 `--min-observations 2` 可过滤只出现一帧的干扰文字。
 
 ## LaMa GPU 修复
 

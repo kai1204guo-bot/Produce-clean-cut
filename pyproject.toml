@@ -27,6 +27,9 @@ ocr-gpu = [
     "onnxruntime-gpu[cuda,cudnn]>=1.22,<1.27",
     "rapidocr>=3.8,<4",
 ]
+asr = [
+    "faster-whisper>=1.2,<2",
+]
 dev = [
     "pillow>=11,<13",
     "ruff>=0.12,<1",

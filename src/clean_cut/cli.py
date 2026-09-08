@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from pathlib import Path
 
+from clean_cut.asr import FasterWhisperTranscriber
 from clean_cut.errors import CleanCutError
 from clean_cut.hard_subtitles import analyze_hard_subtitles
 from clean_cut.inpaint import LamaOnnxBackend, OpenCvInpaintBackend, SttnBackend
@@ -18,6 +20,7 @@ from clean_cut.quality import evaluate_repair
 from clean_cut.residuals import scan_residual_subtitles
 from clean_cut.scene_detection import detect_scene_cuts
 from clean_cut.subtitle_data import Region
+from clean_cut.subtitle_tracking import TrackingConfig
 from clean_cut.tools import write_text_atomically
 from clean_cut.video_repair import load_hard_subtitle_plan, repair_video
 
@@ -50,11 +53,29 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="字幕区域，格式为x,y,width,height",
     )
+
+    asr_batch_parser = subparsers.add_parser(
+        "asr-batch", help="使用 Faster-Whisper 批量从语音生成 SRT"
+    )
+    asr_batch_parser.add_argument("source_dir", type=Path)
+    asr_batch_parser.add_argument("--output-dir", type=Path, required=True)
+    asr_batch_parser.add_argument("--model", default="turbo")
+    asr_batch_parser.add_argument("--model-dir", type=Path)
+    asr_batch_parser.add_argument("--device", choices=("cpu", "cuda"), default="cuda")
+    asr_batch_parser.add_argument("--compute-type", default="float16")
+    asr_batch_parser.add_argument("--language", default="en")
+    asr_batch_parser.add_argument("--cuda-dll-dir", type=Path)
     hard_parser.add_argument(
         "--interval-ms",
         type=int,
         default=250,
         help="OCR抽帧间隔，默认250毫秒",
+    )
+    hard_parser.add_argument(
+        "--min-observations",
+        type=int,
+        default=1,
+        help="字幕至少连续识别次数，默认1；过滤画面文字建议设为2",
     )
 
     repair_parser = subparsers.add_parser("repair", help="根据硬字幕计划修复视频")
@@ -153,6 +174,7 @@ def build_parser() -> argparse.ArgumentParser:
     libtv_process_parser.add_argument("--template-node", required=True)
     libtv_process_parser.add_argument("--region", type=_parse_region, required=True)
     libtv_process_parser.add_argument("--interval-ms", type=int, default=250)
+    libtv_process_parser.add_argument("--min-observations", type=int, default=1)
     libtv_process_parser.add_argument("--libtv-executable", type=Path)
     libtv_process_parser.add_argument(
         "--cover-frames",
@@ -186,7 +208,42 @@ def main(argv: list[str] | None = None) -> int:
                 region=args.region,
                 backend=backend,
                 interval_ms=args.interval_ms,
+                tracking_config=TrackingConfig(
+                    minimum_observation_count=args.min_observations
+                ),
             ).to_dict()
+        elif args.command == "asr-batch":
+            output_dir = args.output_dir.resolve()
+            output_dir.mkdir(parents=True, exist_ok=True)
+            videos = sorted(
+                args.source_dir.resolve().glob("*.mp4"),
+                key=lambda path: (
+                    int(match.group(1))
+                    if (match := re.search(r"EP\s*(\d+)", path.stem, re.IGNORECASE))
+                    else 999_999,
+                    path.name.casefold(),
+                ),
+            )
+            transcriber = FasterWhisperTranscriber(
+                model=args.model,
+                device=args.device,
+                compute_type=args.compute_type,
+                model_dir=args.model_dir,
+                cuda_dll_dir=args.cuda_dll_dir,
+            )
+            outputs = []
+            for video in videos:
+                destination = output_dir / f"{video.stem}.srt"
+                transcriber.write_srt(video, destination, language=args.language)
+                outputs.append(str(destination))
+                print(
+                    json.dumps(
+                        {"status": "completed", "source": str(video), "srt": str(destination)},
+                        ensure_ascii=False,
+                    ),
+                    flush=True,
+                )
+            result = {"status": "completed", "count": len(outputs), "outputs": outputs}
         elif args.command == "repair":
             plan = load_hard_subtitle_plan(args.plan)
             if args.backend == "lama":
@@ -321,6 +378,9 @@ def main(argv: list[str] | None = None) -> int:
                 region=args.region,
                 backend=RapidOcrBackend(),
                 interval_ms=args.interval_ms,
+                tracking_config=TrackingConfig(
+                    minimum_observation_count=args.min_observations
+                ),
             )
             repair = repair_with_libtv(
                 args.source,

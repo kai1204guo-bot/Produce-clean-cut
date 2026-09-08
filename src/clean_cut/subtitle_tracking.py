@@ -51,6 +51,7 @@ class TrackingConfig:
     minimum_text_similarity: float = 0.55
     minimum_cue_duration_ms: int = 120
     minimum_single_observation_confidence: float = 0.8
+    minimum_observation_count: int = 1
 
 
 def merge_frame_observations(
@@ -153,6 +154,8 @@ def build_subtitle_cues(
     ordered_tracks = sorted(tracks, key=lambda track: track.observations[0].timestamp_ms)
     cues: list[SubtitleCue] = []
     for index, track in enumerate(ordered_tracks, start=1):
+        if len(track.observations) < config.minimum_observation_count:
+            continue
         text, confidence = _consensus(track)
         if (
             len(track.observations) == 1

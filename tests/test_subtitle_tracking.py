@@ -2,7 +2,11 @@ from unittest import TestCase
 
 from clean_cut.srt import format_srt_timestamp, render_srt
 from clean_cut.subtitle_data import OcrObservation, Point, Polygon
-from clean_cut.subtitle_tracking import build_subtitle_cues, merge_frame_observations
+from clean_cut.subtitle_tracking import (
+    TrackingConfig,
+    build_subtitle_cues,
+    merge_frame_observations,
+)
 
 
 def observation(
@@ -36,6 +40,18 @@ class SubtitleTrackingTests(TestCase):
         )
 
         self.assertEqual(cues, [])
+
+    def test_can_require_repeated_observations_to_drop_frame_text(self) -> None:
+        cues = build_subtitle_cues(
+            [
+                observation(0, 0, "CAUTION"),
+                observation(1, 1000, "hold him down"),
+                observation(2, 1500, "hold him down"),
+            ],
+            TrackingConfig(minimum_observation_count=2),
+        )
+
+        self.assertEqual([cue.text for cue in cues], ["hold him down"])
 
     def test_prefers_high_confidence_reading_over_repeated_ocr_error(self) -> None:
         cues = build_subtitle_cues(
