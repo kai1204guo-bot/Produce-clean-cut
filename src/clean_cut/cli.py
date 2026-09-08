@@ -7,13 +7,15 @@ from pathlib import Path
 
 from clean_cut.errors import CleanCutError
 from clean_cut.hard_subtitles import analyze_hard_subtitles
-from clean_cut.inpaint import LamaOnnxBackend, OpenCvInpaintBackend
+from clean_cut.inpaint import LamaOnnxBackend, OpenCvInpaintBackend, SttnBackend
 from clean_cut.masks import MaskRenderConfig
 from clean_cut.media import probe_media
-from clean_cut.model_store import download_lama_model
+from clean_cut.model_store import download_lama_model, download_sttn_model
 from clean_cut.ocr import RapidOcrBackend
 from clean_cut.pipeline import process_media
+from clean_cut.quality import evaluate_repair
 from clean_cut.subtitle_data import Region
+from clean_cut.tools import write_text_atomically
 from clean_cut.video_repair import load_hard_subtitle_plan, repair_video
 
 
@@ -58,7 +60,7 @@ def build_parser() -> argparse.ArgumentParser:
     repair_parser.add_argument("--output", type=Path, required=True, help="清水视频输出路径")
     repair_parser.add_argument(
         "--backend",
-        choices=("opencv", "lama"),
+        choices=("opencv", "lama", "sttn"),
         default="opencv",
         help="修复后端，默认opencv",
     )
@@ -74,6 +76,8 @@ def build_parser() -> argparse.ArgumentParser:
     repair_parser.add_argument("--hold-before-ms", type=int, default=120)
     repair_parser.add_argument("--hold-after-ms", type=int, default=120)
     repair_parser.add_argument("--crf", type=int, default=18, help="H.264输出CRF")
+    repair_parser.add_argument("--temporal-chunk-frames", type=int, default=30)
+    repair_parser.add_argument("--temporal-overlap-frames", type=int, default=5)
 
     model_parser = subparsers.add_parser("download-lama", help="下载并校验OpenCV LaMa模型")
     model_parser.add_argument("destination", type=Path, help="模型保存路径")
@@ -83,6 +87,16 @@ def build_parser() -> argparse.ArgumentParser:
         default="fp32",
         help="默认下载支持CUDA的FP32版本",
     )
+
+    sttn_model_parser = subparsers.add_parser("download-sttn", help="下载并校验STTN模型")
+    sttn_model_parser.add_argument("destination", type=Path, help="模型保存路径")
+
+    quality_parser = subparsers.add_parser("evaluate", help="评测修复视频质量")
+    quality_parser.add_argument("source", type=Path, help="带字幕的输入视频")
+    quality_parser.add_argument("--repaired", type=Path, required=True, help="修复后视频")
+    quality_parser.add_argument("--plan", type=Path, required=True, help="硬字幕计划JSON")
+    quality_parser.add_argument("--reference-clean", type=Path, help="可选的无字幕参考视频")
+    quality_parser.add_argument("--output", type=Path, help="可选的质量报告JSON输出")
     return parser
 
 
@@ -120,6 +134,13 @@ def main(argv: list[str] | None = None) -> int:
                     args.model,
                     use_gpu=args.device == "cuda",
                 )
+            elif args.backend == "sttn":
+                if args.model is None:
+                    parser.error("使用sttn后端时必须提供--model")
+                repair_backend = SttnBackend(
+                    args.model,
+                    use_gpu=args.device == "cuda",
+                )
             else:
                 repair_backend = OpenCvInpaintBackend()
             result = {
@@ -136,18 +157,40 @@ def main(argv: list[str] | None = None) -> int:
                             hold_after_ms=args.hold_after_ms,
                         ),
                         crf=args.crf,
+                        temporal_chunk_frames=args.temporal_chunk_frames,
+                        temporal_overlap_frames=args.temporal_overlap_frames,
                     )
                 ),
                 "backend": args.backend,
                 "status": "completed",
             }
-        else:
+        elif args.command == "download-lama":
             result = {
                 "model": str(
                     download_lama_model(args.destination, variant=args.variant)
                 ),
                 "status": "completed",
             }
+        elif args.command == "download-sttn":
+            result = {
+                "model": str(download_sttn_model(args.destination)),
+                "status": "completed",
+            }
+        else:
+            plan = load_hard_subtitle_plan(args.plan)
+            result = evaluate_repair(
+                args.source,
+                args.repaired,
+                plan,
+                reference_clean=args.reference_clean,
+            ).to_dict()
+            if args.output is not None:
+                if args.output.exists():
+                    raise CleanCutError(f"质量报告已存在，未执行覆盖：{args.output.resolve()}")
+                write_text_atomically(
+                    args.output,
+                    json.dumps(result, ensure_ascii=False, indent=2) + "\n",
+                )
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
     except CleanCutError as exc:

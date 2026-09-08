@@ -11,6 +11,8 @@ from clean_cut.inpaint import (
     FP32_LAMA_URL,
     OPENCV_LAMA_SHA256,
     OPENCV_LAMA_URL,
+    STTN_SHA256,
+    STTN_URL,
     sha256_file,
 )
 
@@ -23,6 +25,19 @@ def download_lama_model(destination: Path, *, variant: str = "fp32") -> Path:
     if variant not in variants:
         raise ValueError(f"未知LaMa模型版本：{variant}")
     model_url, expected_hash = variants[variant]
+    return _download_verified_model(destination, model_url, expected_hash, "LaMa")
+
+
+def download_sttn_model(destination: Path) -> Path:
+    return _download_verified_model(destination, STTN_URL, STTN_SHA256, "STTN")
+
+
+def _download_verified_model(
+    destination: Path,
+    model_url: str,
+    expected_hash: str,
+    label: str,
+) -> Path:
     destination = destination.resolve()
     if destination.is_file():
         if sha256_file(destination) == expected_hash:
@@ -31,10 +46,7 @@ def download_lama_model(destination: Path, *, variant: str = "fp32") -> Path:
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = destination.with_name(f".{destination.name}.{uuid4().hex}.download")
     try:
-        request = urllib.request.Request(
-            model_url,
-            headers={"User-Agent": "Produce-Clean-Cut/0.1"},
-        )
+        request = urllib.request.Request(model_url, headers={"User-Agent": "Produce-Clean-Cut/0.1"})
         with urllib.request.urlopen(request, timeout=60) as response:
             with temporary.open("wb") as output:
                 while chunk := response.read(1024 * 1024):
@@ -42,11 +54,11 @@ def download_lama_model(destination: Path, *, variant: str = "fp32") -> Path:
         actual_hash = sha256_file(temporary)
         if actual_hash != expected_hash:
             raise CleanCutError(
-                f"下载的LaMa模型校验失败：期望{expected_hash}，实际{actual_hash}。"
+                f"下载的{label}模型校验失败：期望{expected_hash}，实际{actual_hash}。"
             )
         os.replace(temporary, destination)
         return destination
     except OSError as exc:
-        raise CleanCutError(f"LaMa模型下载失败：{exc}") from exc
+        raise CleanCutError(f"{label}模型下载失败：{exc}") from exc
     finally:
         temporary.unlink(missing_ok=True)

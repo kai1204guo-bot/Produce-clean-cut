@@ -13,6 +13,7 @@
 - 硬字幕OCR可选依赖为RapidOCR 3.x与ONNX Runtime。
 - 视频修复依赖 OpenCV 4.10+；LaMa 可使用 ONNX Runtime CPU 或 CUDA。
 - NVIDIA GeForce RTX 5060 Ti 上已验证 FP32 LaMa 的 CUDA 执行提供程序。
+- 官方 STTN 权重已在 PyTorch 2.11 CPU 与 CUDA 12.8 环境完成真实推理验证。
 
 ## 已完成验证
 
@@ -37,10 +38,15 @@
 19. 增加模型下载、固定 SHA-256 校验和模型文件 Git 排除；
 20. 对可疑 VFR 输入拒绝修复，避免按帧号计算时间造成漂移；
 21. 修复 Windows 下 NVIDIA Python wheel 的 CUDA/cuDNN 动态库发现问题。
+22. 将官方 STTN 推理网络适配到 Python 3.11 与现代 PyTorch，并保持权重键严格匹配；
+23. 实现 30 帧时序分块和 5 帧上下文重叠，避免一次载入整条长视频；
+24. 实现结构、音频、时长、遮罩 MAE/PSNR 和时序残差质量报告；
+25. 官方 Google Drive 与下载镜像中的 STTN 权重哈希交叉验证一致；
+26. RTX 5060 Ti 上三帧实模冒烟测试约 2.1 秒，CPU 约 7.4 秒。
 
 ## 自动化测试
 
-当前包含 19 项测试（未配置模型时 LaMa 实模测试自动跳过）：
+当前包含 22 项测试（未配置模型时 LaMa/STTN 实模测试自动跳过）：
 
 - 文本与图像字幕编码分类；
 - 文本软字幕分流；
@@ -56,15 +62,19 @@
 - 视频修复与音频保留端到端测试；
 - CFR/VFR 帧率判定；
 - 可选的 LaMa CPU/CUDA 实模推理测试。
+- 时序后端重叠分块与输出帧数；
+- 有/无干净参考视频的质量指标协议；
+- 可选的 STTN CPU/CUDA 实模推理测试。
 
 GitHub Actions 会在每次推送和拉取请求时使用 Python 3.11 与 FFmpeg 重跑测试。
 
 ## 尚未覆盖
 
 - PGS/VobSub 等图像字幕 OCR；
-- STTN 时序修复；
 - VFR 的逐帧 PTS 修复链路；
 - LaMa 的分块/批处理与长视频性能优化；
+- STTN 场景切换分段和自适应显存分块；
+- 无参考条件下的字幕残留 OCR 复检；
 - PySide6 桌面界面。
 
 ## 下一验证批次
@@ -72,7 +82,7 @@ GitHub Actions 会在每次推送和拉取请求时使用 Python 3.11 与 FFmpeg
 下一批优先建立质量评测与时序修复基准：
 
 1. 建立带描边、双行、渐隐和中英混排字幕的合成测试素材；
-2. 记录 OpenCV、LaMa CPU、LaMa CUDA 的吞吐与显存数据；
-3. 接入 STTN 修复后端并验证帧间稳定性；
+2. 记录 OpenCV、LaMa、STTN 的长片吞吐、显存和时序残差数据；
+3. 增加场景切换检测，阻止 STTN 跨镜头引用；
 4. 引入逐帧 PTS，支持 VFR 视频；
-5. 增加输出视频的画质与音画同步回归检查。
+5. 对输出修复区域重新执行 OCR，定位字幕残留时间段。

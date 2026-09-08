@@ -5,7 +5,13 @@ import tempfile
 from pathlib import Path
 from unittest import TestCase, skipUnless
 
-from clean_cut.inpaint import LamaOnnxBackend, OpenCvInpaintBackend, composite_repair
+from clean_cut.inpaint import (
+    LamaOnnxBackend,
+    OpenCvInpaintBackend,
+    SequenceInpaintBackend,
+    SttnBackend,
+    composite_repair,
+)
 from clean_cut.masks import MaskRenderConfig, render_mask
 from clean_cut.media import probe_media
 from clean_cut.subtitle_data import HardSubtitlePlan, MaskKeyframe, Point, Polygon, Region
@@ -98,6 +104,54 @@ class InpaintTests(TestCase):
             self.assertTrue(ok)
             self.assertLess(float(frame[60, 80].mean()), 200)
 
+    @skipUnless(HAS_FFMPEG, "FFmpeg is required for the integration test")
+    def test_repairs_video_in_overlapping_temporal_chunks(self) -> None:
+        import cv2
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "source.mkv"
+            destination = root / "clean.mp4"
+            writer = cv2.VideoWriter(
+                str(source),
+                cv2.VideoWriter_fourcc(*"FFV1"),
+                10,
+                (160, 90),
+            )
+            for _ in range(10):
+                frame = np.full((90, 160, 3), 120, np.uint8)
+                frame[55:70, 50:110] = 255
+                writer.write(frame)
+            writer.release()
+            polygon = Polygon((Point(50, 55), Point(110, 55), Point(110, 70), Point(50, 70)))
+            plan = HardSubtitlePlan(
+                1,
+                str(source.resolve()),
+                160,
+                90,
+                100,
+                "test",
+                Region(40, 45, 80, 35),
+                mask_keyframes=[
+                    MaskKeyframe(index, index * 100, (polygon,)) for index in range(10)
+                ],
+            )
+            backend = _FlatSequenceBackend()
+            repair_video(
+                source,
+                destination,
+                plan,
+                backend,
+                temporal_chunk_frames=6,
+                temporal_overlap_frames=2,
+            )
+            self.assertGreaterEqual(backend.calls, 2)
+            capture = cv2.VideoCapture(str(destination))
+            output_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+            capture.release()
+            self.assertEqual(output_frames, 10)
+
     def test_lama_model_inference_when_model_is_configured(self) -> None:
         import numpy as np
 
@@ -116,3 +170,32 @@ class InpaintTests(TestCase):
         self.assertEqual(result.shape, frame.shape)
         self.assertEqual(result.dtype, frame.dtype)
         self.assertFalse(np.array_equal(result, frame))
+
+    def test_sttn_model_inference_when_model_is_configured(self) -> None:
+        import numpy as np
+
+        model_value = os.environ.get("CLEAN_CUT_STTN_MODEL")
+        if not model_value:
+            self.skipTest("CLEAN_CUT_STTN_MODEL is not configured")
+        frames = [np.full((90, 160, 3), 100 + index * 2, np.uint8) for index in range(3)]
+        masks = [np.zeros((90, 160), np.uint8) for _ in frames]
+        for mask in masks:
+            mask[50:70, 50:110] = 255
+        use_gpu = os.environ.get("CLEAN_CUT_STTN_DEVICE") == "cuda"
+        backend = SttnBackend(Path(model_value), use_gpu=use_gpu)
+        results = backend.inpaint_sequence(frames, masks)
+        self.assertEqual(len(results), len(frames))
+        self.assertTrue(all(result.shape == frames[0].shape for result in results))
+        self.assertTrue(all(result.dtype == frames[0].dtype for result in results))
+        self.assertFalse(np.array_equal(results[0], frames[0]))
+
+
+class _FlatSequenceBackend(SequenceInpaintBackend):
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def inpaint_sequence(self, frames: list[object], masks: list[object]) -> list[object]:
+        import numpy as np
+
+        self.calls += 1
+        return [np.full_like(frame, 80) for frame in frames]
