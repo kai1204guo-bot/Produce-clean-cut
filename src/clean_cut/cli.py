@@ -8,6 +8,7 @@ from pathlib import Path
 from clean_cut.errors import CleanCutError
 from clean_cut.hard_subtitles import analyze_hard_subtitles
 from clean_cut.inpaint import LamaOnnxBackend, OpenCvInpaintBackend, SttnBackend
+from clean_cut.libtv import repair_with_libtv
 from clean_cut.masks import MaskRenderConfig
 from clean_cut.media import probe_media
 from clean_cut.model_store import download_lama_model, download_sttn_model
@@ -118,6 +119,36 @@ def build_parser() -> argparse.ArgumentParser:
     scenes_parser.add_argument("source", type=Path, help="输入视频路径")
     scenes_parser.add_argument("--threshold", type=float, default=0.6)
     scenes_parser.add_argument("--min-interval-frames", type=int, default=3)
+
+    libtv_parser = subparsers.add_parser(
+        "libtv-repair",
+        help="通过已有的 LibTV 智能去字幕模板生成清水视频",
+    )
+    libtv_parser.add_argument("source", type=Path, help="输入视频路径")
+    libtv_parser.add_argument("--output", type=Path, required=True, help="清水视频输出路径")
+    libtv_parser.add_argument("--project", required=True, help="LibTV 画布 UUID")
+    libtv_parser.add_argument(
+        "--template-node",
+        required=True,
+        help="已在网页执行过一次智能去字幕的模板节点名称或 nodeKey",
+    )
+    libtv_parser.add_argument(
+        "--libtv-executable",
+        type=Path,
+        help="可选的 libtv CLI 路径；默认从 PATH 或 ~/.libtv/libtv.exe 查找",
+    )
+
+    libtv_process_parser = subparsers.add_parser(
+        "libtv-process",
+        help="生成 SRT，并通过 LibTV 智能去字幕输出清水视频",
+    )
+    libtv_process_parser.add_argument("source", type=Path, help="输入视频路径")
+    libtv_process_parser.add_argument("--output-dir", type=Path, required=True)
+    libtv_process_parser.add_argument("--project", required=True, help="LibTV 画布 UUID")
+    libtv_process_parser.add_argument("--template-node", required=True)
+    libtv_process_parser.add_argument("--region", type=_parse_region, required=True)
+    libtv_process_parser.add_argument("--interval-ms", type=int, default=250)
+    libtv_process_parser.add_argument("--libtv-executable", type=Path)
     return parser
 
 
@@ -188,9 +219,7 @@ def main(argv: list[str] | None = None) -> int:
             }
         elif args.command == "download-lama":
             result = {
-                "model": str(
-                    download_lama_model(args.destination, variant=args.variant)
-                ),
+                "model": str(download_lama_model(args.destination, variant=args.variant)),
                 "status": "completed",
             }
         elif args.command == "download-sttn":
@@ -242,7 +271,7 @@ def main(argv: list[str] | None = None) -> int:
                     args.output,
                     json.dumps(result, ensure_ascii=False, indent=2) + "\n",
                 )
-        else:
+        elif args.command == "detect-scenes":
             cuts = detect_scene_cuts(
                 args.source,
                 threshold=args.threshold,
@@ -252,6 +281,51 @@ def main(argv: list[str] | None = None) -> int:
                 "source": str(args.source.resolve()),
                 "scene_count": len(cuts) + 1,
                 "cuts": [cut.to_dict() for cut in cuts],
+            }
+        elif args.command == "libtv-repair":
+            result = repair_with_libtv(
+                args.source,
+                args.output,
+                project_uuid=args.project,
+                template_node=args.template_node,
+                executable=args.libtv_executable,
+            ).to_dict()
+        else:
+            output_dir = args.output_dir.resolve()
+            output_dir.mkdir(parents=True, exist_ok=True)
+            stem = args.source.stem.rstrip(" .") or "video"
+            clean_output = output_dir / f"{stem}_libtv_clean.mp4"
+            planned_outputs = [
+                output_dir / f"{stem}.srt",
+                output_dir / f"{stem}_hard_subtitle_plan.json",
+                clean_output,
+            ]
+            existing_outputs = [path for path in planned_outputs if path.exists()]
+            if existing_outputs:
+                joined = "、".join(str(path) for path in existing_outputs)
+                raise CleanCutError(f"输出文件已存在，未执行覆盖：{joined}")
+            plan = analyze_hard_subtitles(
+                args.source,
+                output_dir,
+                region=args.region,
+                backend=RapidOcrBackend(),
+                interval_ms=args.interval_ms,
+            )
+            repair = repair_with_libtv(
+                args.source,
+                clean_output,
+                project_uuid=args.project,
+                template_node=args.template_node,
+                executable=args.libtv_executable,
+            )
+            result = {
+                "status": "completed",
+                "source": str(args.source.resolve()),
+                "clean_video": str(repair.output),
+                "subtitle_files": [str(output_dir / f"{stem}.srt")],
+                "hard_subtitle_plan": str(output_dir / f"{stem}_hard_subtitle_plan.json"),
+                "subtitle_count": len(plan.cues),
+                "libtv": repair.to_dict(),
             }
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0

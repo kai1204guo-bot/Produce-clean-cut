@@ -9,3 +9,4 @@ build/
 .clean-cut-work/
 .clean-cut-models/
 test-output/
+artifacts/

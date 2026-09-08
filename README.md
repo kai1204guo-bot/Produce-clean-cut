@@ -79,6 +79,31 @@ STTN 修复默认使用 `--scene-threshold 0.6` 检测硬切，并在切镜前�
 
 `evaluate` 不提供干净参考视频时检查结构完整性并报告遮罩区域帧间变化；技术基准可增加 `--reference-clean clean.mp4`，此时额外计算遮罩 MAE、PSNR 与时序残差。增加 `--check-residual` 后，只在原字幕活跃时间附近重新执行 OCR，并将与原字幕文字相似的检测结果标记为 `needs_review`。复检状态还包括 `passed`、`not_applicable` 和 `inconclusive`，避免在没有字幕条目或没有有效样本时误报“通过”。这能减少背景招牌误报，但仍需要人工复核。
 
+## LibTV 智能去字幕
+
+安装并登录官方 `libtv` CLI 后，可把 LibTV 的“智能去字幕”作为云端修复后端。由于 CLI 1.1.3 不能直接新建隐藏的擦除模型节点，需要先在目标画布中对任意视频手动执行一次“智能去字幕”，并把生成节点作为模板。后续视频会由程序自动上传、替换模板输入、同步等待处理完成并下载；模板画布不适合并发运行多个任务。
+
+以下命令一次生成 SRT、硬字幕计划和 LibTV 清水视频：
+
+```powershell
+python -m clean_cut libtv-process "input.mp4" `
+  --output-dir "output" `
+  --region "0,1150,1080,600" `
+  --project "画布UUID" `
+  --template-node "视频一键去字幕-35"
+```
+
+如果已经有 SRT，只运行云端修复：
+
+```powershell
+python -m clean_cut libtv-repair "input.mp4" `
+  --output "output/input_libtv_clean.mp4" `
+  --project "画布UUID" `
+  --template-node "视频一键去字幕-35"
+```
+
+LibTV 当前要求视频不少于 3 秒、最长边不超过 2K，支持 MP4、FLV、TS、AVI、MOV、MKV 和 WMV。生成服务可能产生积分或会员额度消耗；程序不会自动重复失败的任务。
+
 STTN 推理结构改编自 MIT 许可的官方实现，署名和许可全文见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
 完整技术规划见 [TECHNICAL_PLAN.md](TECHNICAL_PLAN.md)。
