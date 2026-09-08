@@ -86,6 +86,18 @@ class LibTvClient:
             raise MediaProcessError(f"{description}失败：LibTV CLI 返回值不是 JSON 对象。")
         return payload
 
+    def get_version(self) -> str:
+        return self._run(["--version"], description="读取 LibTV CLI 版本").strip()
+
+    def require_subtitle_run_support(self) -> None:
+        version = self.get_version()
+        if version == "1.1.3":
+            raise MediaProcessError(
+                "LibTV CLI 1.1.3 可以读取智能去字幕节点，但运行时会错误地用 "
+                "supportModels.video 白名单拒绝隐藏模型 volcano-subtitle-eraser。"
+                "已在上传前停止；请等待官方发布修复版本。"
+            )
+
     def get_node(self, project_uuid: str, node: str) -> dict[str, Any]:
         return self._run_json(
             ["node", node, "-p", project_uuid],
@@ -154,7 +166,10 @@ class LibTvClient:
                 arguments.extend(["--left-rm", source])
         if input_node not in old_sources:
             arguments.extend(["--left-add", input_node])
-        arguments.extend(["-s", "mode=Subtitle", "--run"])
+        # Any --set forces CLI 1.1.3 to revalidate the hidden model against
+        # supportModels.video and reject it. The template already owns mode/model;
+        # changing only its input edge lets the CLI rebuild videoList internally.
+        arguments.append("--run")
         return self._run_json(arguments, description="运行 LibTV 智能去字幕")
 
     def download_node(
@@ -342,6 +357,7 @@ def repair_with_libtv(
     output.parent.mkdir(parents=True, exist_ok=True)
 
     client = LibTvClient(executable)
+    client.require_subtitle_run_support()
     template_key = client.validate_subtitle_template(project_uuid, template_node)
     upload_name = f"clean-cut-{source.stem}-{uuid4().hex[:8]}"
     uploaded_node = client.upload_video(source, project_uuid, upload_name)

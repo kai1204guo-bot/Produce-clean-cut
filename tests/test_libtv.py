@@ -16,6 +16,9 @@ class FakeLibTvClient(LibTvClient):
         self.executable = "libtv"
         self.arguments: list[str] | None = None
 
+    def require_subtitle_run_support(self) -> None:
+        return None
+
     def get_node(self, project_uuid: str, node: str) -> dict[str, object]:
         return {
             "nodeKey": "template-key",
@@ -67,8 +70,6 @@ class LibTvClientTests(TestCase):
                 "old-source",
                 "--left-add",
                 "new-source",
-                "-s",
-                "mode=Subtitle",
                 "--run",
             ],
         )
@@ -100,6 +101,12 @@ class LibTvClientTests(TestCase):
         with patch.object(client, "_run_json", return_value=json.loads("{}")):
             with self.assertRaisesRegex(MediaProcessError, "缺少 nodeKey"):
                 client.upload_video(Path("video.mp4"), "project", "video")
+
+    def test_blocks_known_cli_version_before_upload(self) -> None:
+        client = FakeLibTvClient()
+        with patch.object(client, "get_version", return_value="1.1.3"):
+            with self.assertRaisesRegex(MediaProcessError, "supportModels.video"):
+                LibTvClient.require_subtitle_run_support(client)
 
     def test_detects_cover_at_first_strong_opening_cut(self) -> None:
         output = """frame:0 pts:0 pts_time:0
