@@ -11,7 +11,6 @@ from clean_cut.media import probe_media
 from clean_cut.models import ProcessingRoute
 from clean_cut.pipeline import process_media
 
-
 HAS_FFMPEG = shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None
 
 
@@ -69,7 +68,8 @@ class SoftSubtitlePipelineTests(TestCase):
             self.assertEqual(report.status, "completed")
             self.assertIsNotNone(report.clean_video)
             self.assertTrue(report.subtitle_files[0].is_file())
-            self.assertIn("阶段零字幕测试", report.subtitle_files[0].read_text(encoding="utf-8-sig"))
+            extracted_text = report.subtitle_files[0].read_text(encoding="utf-8-sig")
+            self.assertIn("阶段零字幕测试", extracted_text)
 
             after = probe_media(report.clean_video or Path())
             self.assertEqual(len(after.subtitle_streams), 0)

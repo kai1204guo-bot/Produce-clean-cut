@@ -12,6 +12,16 @@ license = { text = "Proprietary" }
 authors = [{ name = "Produce Clean Cut contributors" }]
 dependencies = []
 
+[project.optional-dependencies]
+ocr = [
+    "onnxruntime>=1.22,<2",
+    "rapidocr>=3.8,<4",
+]
+dev = [
+    "pillow>=11,<13",
+    "ruff>=0.12,<1",
+]
+
 [project.scripts]
 clean-cut = "clean_cut.cli:main"
 
@@ -28,4 +38,3 @@ line-length = 100
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
-

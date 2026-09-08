@@ -11,6 +11,7 @@ from clean_cut.soft_subtitles import (
     extract_text_subtitle,
     remux_without_subtitles,
 )
+from clean_cut.tools import write_text_atomically
 
 
 def _safe_stem(path: Path) -> str:
@@ -54,8 +55,8 @@ def process_media(source: Path, output_dir: Path) -> ProcessingReport:
         report.warnings.append("未检测到软字幕轨道，需要进入硬字幕OCR与画面修复流程。")
 
     _require_new_outputs([report_path])
-    report_path.write_text(
+    write_text_atomically(
+        report_path,
         json.dumps(report.to_dict(), ensure_ascii=False, indent=2),
-        encoding="utf-8",
     )
     return report

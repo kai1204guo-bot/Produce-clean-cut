@@ -14,7 +14,6 @@ from clean_cut.models import (
 )
 from clean_cut.tools import require_tool
 
-
 TEXT_SUBTITLE_CODECS = frozenset(
     {
         "ass",

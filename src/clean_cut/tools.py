@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from collections.abc import Sequence
 from pathlib import Path
+from uuid import uuid4
 
 from clean_cut.errors import MediaProcessError, ToolNotFoundError
 
@@ -38,3 +40,15 @@ def run_command(
         raise MediaProcessError(f"{description}失败：未生成预期文件 {expected_output}")
     return result
 
+
+def write_text_atomically(destination: Path, content: str) -> None:
+    destination = destination.resolve()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(
+        f".{destination.stem}.{uuid4().hex}.tmp{destination.suffix}"
+    )
+    try:
+        temporary.write_text(content, encoding="utf-8")
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
