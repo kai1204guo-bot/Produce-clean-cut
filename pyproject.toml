@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "produce-clean-cut"
+version = "0.1.0"
+description = "Local pipeline for extracting subtitles and producing clean video copies."
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+license = { text = "Proprietary" }
+authors = [{ name = "Produce Clean Cut contributors" }]
+dependencies = []
+
+[project.scripts]
+clean-cut = "clean_cut.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/clean_cut"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
