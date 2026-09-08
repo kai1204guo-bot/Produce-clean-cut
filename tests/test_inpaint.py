@@ -152,6 +152,50 @@ class InpaintTests(TestCase):
             capture.release()
             self.assertEqual(output_frames, 10)
 
+    @skipUnless(HAS_FFMPEG, "FFmpeg is required for the integration test")
+    def test_scene_cut_flushes_temporal_context(self) -> None:
+        import cv2
+        import numpy as np
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "source.mkv"
+            destination = root / "clean.mp4"
+            writer = cv2.VideoWriter(
+                str(source),
+                cv2.VideoWriter_fourcc(*"FFV1"),
+                10,
+                (160, 90),
+            )
+            for index in range(8):
+                value = 0 if index < 4 else 255
+                writer.write(np.full((90, 160, 3), value, np.uint8))
+            writer.release()
+            polygon = Polygon((Point(50, 55), Point(110, 55), Point(110, 70), Point(50, 70)))
+            plan = HardSubtitlePlan(
+                1,
+                str(source.resolve()),
+                160,
+                90,
+                100,
+                "test",
+                Region(40, 45, 80, 35),
+                mask_keyframes=[
+                    MaskKeyframe(index, index * 100, (polygon,)) for index in range(8)
+                ],
+            )
+            backend = _FlatSequenceBackend()
+            repair_video(
+                source,
+                destination,
+                plan,
+                backend,
+                temporal_chunk_frames=20,
+                temporal_overlap_frames=2,
+                scene_threshold=0.6,
+            )
+            self.assertEqual(backend.calls, 2)
+
     def test_lama_model_inference_when_model_is_configured(self) -> None:
         import numpy as np
 

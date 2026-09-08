@@ -10,6 +10,7 @@ from clean_cut.errors import CleanCutError, MediaProcessError
 from clean_cut.inpaint import InpaintBackend, SequenceInpaintBackend, composite_repair
 from clean_cut.masks import MaskRenderConfig, RenderedMask, polygons_for_timestamp, render_mask
 from clean_cut.media import has_variable_frame_rate, probe_media
+from clean_cut.scene_detection import SceneDetector
 from clean_cut.subtitle_data import HardSubtitlePlan
 from clean_cut.tools import require_tool, run_command
 
@@ -32,6 +33,8 @@ def repair_video(
     crf: int = 18,
     temporal_chunk_frames: int = 30,
     temporal_overlap_frames: int = 5,
+    scene_threshold: float | None = 0.6,
+    scene_min_interval_frames: int = 3,
 ) -> Path:
     try:
         import cv2
@@ -51,6 +54,8 @@ def repair_video(
         raise ValueError("CRF必须在0到51之间。")
     if temporal_chunk_frames <= temporal_overlap_frames or temporal_overlap_frames < 0:
         raise ValueError("时序分块帧数必须大于非负的重叠帧数。")
+    if scene_threshold is not None and not 0 < scene_threshold <= 1:
+        raise ValueError("场景切换阈值必须在0到1之间，或设为None禁用。")
 
     media_info = probe_media(source)
     video_stream = next(
@@ -97,6 +102,14 @@ def repair_video(
                 if isinstance(backend, SequenceInpaintBackend):
                     buffered_frames: list[object] = []
                     buffered_masks: list[RenderedMask | None] = []
+                    scene_detector = (
+                        SceneDetector(
+                            threshold=scene_threshold,
+                            min_interval_frames=scene_min_interval_frames,
+                        )
+                        if scene_threshold is not None
+                        else None
+                    )
 
                     def flush_temporal(*, final: bool) -> None:
                         if not buffered_frames:
@@ -134,6 +147,10 @@ def repair_video(
                         ok, frame = capture.read()
                         if not ok:
                             break
+                        if scene_detector is not None:
+                            scene_cut = scene_detector.update(frame, frame_index, fps)
+                            if scene_cut is not None:
+                                flush_temporal(final=True)
                         buffered_frames.append(frame)
                         buffered_masks.append(
                             _mask_for_frame(

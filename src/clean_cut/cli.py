@@ -14,6 +14,8 @@ from clean_cut.model_store import download_lama_model, download_sttn_model
 from clean_cut.ocr import RapidOcrBackend
 from clean_cut.pipeline import process_media
 from clean_cut.quality import evaluate_repair
+from clean_cut.residuals import scan_residual_subtitles
+from clean_cut.scene_detection import detect_scene_cuts
 from clean_cut.subtitle_data import Region
 from clean_cut.tools import write_text_atomically
 from clean_cut.video_repair import load_hard_subtitle_plan, repair_video
@@ -78,6 +80,12 @@ def build_parser() -> argparse.ArgumentParser:
     repair_parser.add_argument("--crf", type=int, default=18, help="H.264输出CRF")
     repair_parser.add_argument("--temporal-chunk-frames", type=int, default=30)
     repair_parser.add_argument("--temporal-overlap-frames", type=int, default=5)
+    repair_parser.add_argument(
+        "--scene-threshold",
+        type=float,
+        default=0.6,
+        help="STTN场景切换阈值，默认0.6",
+    )
 
     model_parser = subparsers.add_parser("download-lama", help="下载并校验OpenCV LaMa模型")
     model_parser.add_argument("destination", type=Path, help="模型保存路径")
@@ -97,6 +105,19 @@ def build_parser() -> argparse.ArgumentParser:
     quality_parser.add_argument("--plan", type=Path, required=True, help="硬字幕计划JSON")
     quality_parser.add_argument("--reference-clean", type=Path, help="可选的无字幕参考视频")
     quality_parser.add_argument("--output", type=Path, help="可选的质量报告JSON输出")
+    quality_parser.add_argument(
+        "--check-residual",
+        action="store_true",
+        help="对原字幕时段执行OCR残留复检",
+    )
+    quality_parser.add_argument("--ocr-score", type=float, default=0.5)
+    quality_parser.add_argument("--residual-similarity", type=float, default=0.45)
+    quality_parser.add_argument("--residual-interval-ms", type=int)
+
+    scenes_parser = subparsers.add_parser("detect-scenes", help="检测视频场景切换")
+    scenes_parser.add_argument("source", type=Path, help="输入视频路径")
+    scenes_parser.add_argument("--threshold", type=float, default=0.6)
+    scenes_parser.add_argument("--min-interval-frames", type=int, default=3)
     return parser
 
 
@@ -159,6 +180,7 @@ def main(argv: list[str] | None = None) -> int:
                         crf=args.crf,
                         temporal_chunk_frames=args.temporal_chunk_frames,
                         temporal_overlap_frames=args.temporal_overlap_frames,
+                        scene_threshold=args.scene_threshold,
                     )
                 ),
                 "backend": args.backend,
@@ -176,24 +198,64 @@ def main(argv: list[str] | None = None) -> int:
                 "model": str(download_sttn_model(args.destination)),
                 "status": "completed",
             }
-        else:
+        elif args.command == "evaluate":
+            if args.output is not None and args.output.exists():
+                raise CleanCutError(f"质量报告已存在，未执行覆盖：{args.output.resolve()}")
             plan = load_hard_subtitle_plan(args.plan)
-            result = evaluate_repair(
+            quality_report = evaluate_repair(
                 args.source,
                 args.repaired,
                 plan,
                 reference_clean=args.reference_clean,
-            ).to_dict()
+            )
+            if args.check_residual:
+                residual_report = scan_residual_subtitles(
+                    args.repaired,
+                    plan,
+                    RapidOcrBackend(text_score=args.ocr_score),
+                    interval_ms=args.residual_interval_ms,
+                    min_source_similarity=args.residual_similarity,
+                )
+                quality_report.residual_check_status = residual_report.status
+                quality_report.residual_intervals = [
+                    {
+                        "start_ms": item.start_ms,
+                        "end_ms": item.end_ms,
+                        "detected_text": item.detected_text,
+                        "confidence": item.confidence,
+                        "source_match": item.source_match,
+                        "sample_count": item.sample_count,
+                    }
+                    for item in residual_report.intervals
+                ]
+                if residual_report.status == "needs_review":
+                    quality_report.warnings.append(
+                        f"检测到{len(residual_report.intervals)}个疑似字幕残留区间。"
+                    )
+                elif residual_report.status == "not_applicable":
+                    quality_report.warnings.append("原字幕计划没有可用于残留比对的字幕条目。")
+                elif residual_report.status == "inconclusive":
+                    quality_report.warnings.append("没有抽取到处于原字幕时段的复检样本。")
+            result = quality_report.to_dict()
             if args.output is not None:
-                if args.output.exists():
-                    raise CleanCutError(f"质量报告已存在，未执行覆盖：{args.output.resolve()}")
                 write_text_atomically(
                     args.output,
                     json.dumps(result, ensure_ascii=False, indent=2) + "\n",
                 )
+        else:
+            cuts = detect_scene_cuts(
+                args.source,
+                threshold=args.threshold,
+                min_interval_frames=args.min_interval_frames,
+            )
+            result = {
+                "source": str(args.source.resolve()),
+                "scene_count": len(cuts) + 1,
+                "cuts": [cut.to_dict() for cut in cuts],
+            }
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
-    except CleanCutError as exc:
+    except (CleanCutError, ValueError) as exc:
         error = json.dumps({"status": "failed", "error": str(exc)}, ensure_ascii=False)
         print(error, file=sys.stderr)
         return 2

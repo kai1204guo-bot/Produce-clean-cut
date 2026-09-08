@@ -14,8 +14,9 @@
 - 将遮罩扩张、羽化，并为字幕淡入淡出增加前后保持；
 - 使用 OpenCV Telea、LaMa ONNX 或 STTN 修复硬字幕画面；
 - STTN 使用带重叠上下文的短片分块，降低长视频内存占用；
+- 检测硬切镜头并在切镜处重置 STTN 上下文，避免跨镜头污染；
 - 通过 FFmpeg 输出 H.264 视频并复制原始音频；
-- 输出时长、音频、遮罩误差、PSNR 和时序残差质量报告；
+- 输出时长、音频、遮罩误差、PSNR、时序残差和字幕残留质量报告；
 - 输出机器可读的任务报告；
 - 使用合成测试视频验证软字幕、硬字幕分析和视频修复链路。
 
@@ -39,7 +40,8 @@ python -m clean_cut inspect "input.mp4"
 python -m clean_cut process "input.mkv" --output-dir "output"
 python -m clean_cut analyze-hard "input.mp4" --region "0,700,1920,300" --output-dir "output"
 python -m clean_cut repair "input.mp4" --plan "output/input_hard_subtitle_plan.json" --output "output/input.clean.mp4"
-python -m clean_cut evaluate "input.mp4" --repaired "output/input.clean.mp4" --plan "output/input_hard_subtitle_plan.json" --output "output/input.quality.json"
+python -m clean_cut detect-scenes "input.mp4"
+python -m clean_cut evaluate "input.mp4" --repaired "output/input.clean.mp4" --plan "output/input_hard_subtitle_plan.json" --check-residual --output "output/input.quality.json"
 ```
 
 `inspect` 只分析媒体；`process` 会根据字幕类型执行当前阶段支持的安全处理。文本软字幕将被提取为 SRT，同时生成移除字幕轨道后的清水视频。
@@ -73,7 +75,9 @@ python -m clean_cut download-sttn ".clean-cut-models/sttn.pth"
 python -m clean_cut repair "input.mp4" --plan "output/input_hard_subtitle_plan.json" --output "output/input.sttn.clean.mp4" --backend sttn --model ".clean-cut-models/sttn.pth" --device cuda
 ```
 
-`evaluate` 不提供干净参考视频时检查结构完整性并报告遮罩区域帧间变化；技术基准可增加 `--reference-clean clean.mp4`，此时额外计算遮罩 MAE、PSNR 与时序残差。没有参考真值时，这些数值不能单独当作“修复成功”的结论。
+STTN 修复默认使用 `--scene-threshold 0.6` 检测硬切，并在切镜前刷新当前时序块。`detect-scenes` 可以在正式修复前单独查看切镜帧、时间和分数；素材误切较多时可适当调高阈值。
+
+`evaluate` 不提供干净参考视频时检查结构完整性并报告遮罩区域帧间变化；技术基准可增加 `--reference-clean clean.mp4`，此时额外计算遮罩 MAE、PSNR 与时序残差。增加 `--check-residual` 后，只在原字幕活跃时间附近重新执行 OCR，并将与原字幕文字相似的检测结果标记为 `needs_review`。复检状态还包括 `passed`、`not_applicable` 和 `inconclusive`，避免在没有字幕条目或没有有效样本时误报“通过”。这能减少背景招牌误报，但仍需要人工复核。
 
 STTN 推理结构改编自 MIT 许可的官方实现，署名和许可全文见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 

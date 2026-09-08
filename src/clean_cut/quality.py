@@ -26,6 +26,8 @@ class QualityReport:
     masked_mae: float | None
     masked_psnr_db: float | None
     temporal_residual_mae: float | None
+    residual_check_status: str = "not_run"
+    residual_intervals: list[dict[str, Any]] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -166,7 +168,7 @@ def evaluate_repair(
     if mask_pixels == 0:
         warnings.append("计划覆盖范围内没有有效遮罩像素。")
     return QualityReport(
-        schema_version=1,
+        schema_version=2,
         source=str(source),
         repaired=str(repaired),
         reference_clean=str(reference_clean) if reference_clean else None,
