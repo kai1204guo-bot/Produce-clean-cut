@@ -23,9 +23,16 @@ class OcrBackend(ABC):
 
 
 class RapidOcrBackend(OcrBackend):
-    def __init__(self, *, text_score: float = 0.5) -> None:
+    def __init__(
+        self,
+        *,
+        text_score: float = 0.5,
+        max_box_height_ratio: float = 0.8,
+    ) -> None:
         if not 0 <= text_score <= 1:
             raise ValueError("OCR最低置信度必须在0到1之间。")
+        if not 0 < max_box_height_ratio <= 1:
+            raise ValueError("OCR文本框最大高度比例必须在0到1之间。")
         try:
             from rapidocr import RapidOCR
         except ImportError as exc:
@@ -33,6 +40,7 @@ class RapidOcrBackend(OcrBackend):
                 "RapidOCR未安装。请安装项目的ocr可选依赖后重试。"
             ) from exc
         self._engine = RapidOCR(params={"Global.text_score": text_score})
+        self._max_box_height_ratio = max_box_height_ratio
 
     def recognize(
         self,
@@ -45,14 +53,20 @@ class RapidOcrBackend(OcrBackend):
     ) -> list[OcrObservation]:
         try:
             import cv2
+            import numpy as np
         except ImportError as exc:
-            raise CleanCutError("RapidOCR图像运行时不完整：缺少OpenCV。") from exc
+            raise CleanCutError("RapidOCR图像运行时不完整：缺少OpenCV或NumPy。") from exc
 
-        frame = cv2.imread(str(image))
+        try:
+            encoded_image = np.frombuffer(image.read_bytes(), dtype=np.uint8)
+        except OSError as exc:
+            raise CleanCutError(f"无法读取OCR图片：{image}") from exc
+        frame = cv2.imdecode(encoded_image, cv2.IMREAD_COLOR)
         if frame is None:
             raise CleanCutError(f"无法读取OCR图片：{image}")
         offset_x = region.x if region else 0
         offset_y = region.y if region else 0
+        ocr_height = frame.shape[0]
         if region:
             frame_height, frame_width = frame.shape[:2]
             right = min(region.x + region.width, frame_width)
@@ -60,6 +74,7 @@ class RapidOcrBackend(OcrBackend):
             if region.x >= right or region.y >= bottom:
                 raise CleanCutError("OCR区域位于图片范围之外。")
             frame = frame[region.y:bottom, region.x:right]
+            ocr_height = bottom - region.y
 
         result = self._engine(frame)
         boxes = getattr(result, "boxes", None)
@@ -74,6 +89,10 @@ class RapidOcrBackend(OcrBackend):
                 Point(float(point[0]) + offset_x, float(point[1]) + offset_y)
                 for point in _as_list(box)
             )
+            polygon = Polygon(points)
+            _, top, _, bottom = polygon.bounds
+            if bottom - top > ocr_height * self._max_box_height_ratio:
+                continue
             observations.append(
                 OcrObservation(
                     frame_index=frame_index,
@@ -81,7 +100,7 @@ class RapidOcrBackend(OcrBackend):
                     duration_ms=duration_ms,
                     text=str(text),
                     confidence=float(score),
-                    polygon=Polygon(points),
+                    polygon=polygon,
                 )
             )
         return observations

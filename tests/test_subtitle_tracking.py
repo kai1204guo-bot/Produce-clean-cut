@@ -5,13 +5,19 @@ from clean_cut.subtitle_data import OcrObservation, Point, Polygon
 from clean_cut.subtitle_tracking import build_subtitle_cues, merge_frame_observations
 
 
-def observation(frame: int, timestamp: int, text: str, x: float = 100) -> OcrObservation:
+def observation(
+    frame: int,
+    timestamp: int,
+    text: str,
+    x: float = 100,
+    confidence: float = 0.9,
+) -> OcrObservation:
     return OcrObservation(
         frame_index=frame,
         timestamp_ms=timestamp,
         duration_ms=500,
         text=text,
-        confidence=0.9,
+        confidence=confidence,
         polygon=Polygon(
             (
                 Point(x, 800),
@@ -24,6 +30,25 @@ def observation(frame: int, timestamp: int, text: str, x: float = 100) -> OcrObs
 
 
 class SubtitleTrackingTests(TestCase):
+    def test_drops_low_confidence_single_character_noise(self) -> None:
+        cues = build_subtitle_cues(
+            [observation(0, 0, "M", confidence=0.6)]
+        )
+
+        self.assertEqual(cues, [])
+
+    def test_prefers_high_confidence_reading_over_repeated_ocr_error(self) -> None:
+        cues = build_subtitle_cues(
+            [
+                observation(0, 0, "you know what I said", confidence=0.97),
+                observation(1, 250, "Yot w wo nid", confidence=0.70),
+                observation(2, 500, "Yot w wo nid", confidence=0.68),
+                observation(3, 750, "Yot w wo nid", confidence=0.68),
+            ]
+        )
+
+        self.assertEqual(cues[0].text, "you know what I said")
+
     def test_merges_jittered_text_and_splits_changed_subtitle(self) -> None:
         cues = build_subtitle_cues(
             [

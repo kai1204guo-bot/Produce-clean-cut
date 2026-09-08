@@ -223,15 +223,19 @@ class SttnBackend(SequenceInpaintBackend):
         if not frames or len(frames) != len(masks):
             raise ValueError("STTN帧与遮罩必须非空且数量一致。")
         torch = self._torch
+        # A reference frame can contain a subtitle outside its own tight OCR polygon.
+        # STTN attention would then copy those unmasked glyphs into another frame.
+        # Hide the union of the chunk's subtitle locations from every reference frame.
+        temporal_mask = np.maximum.reduce(masks)
         resized_frames = []
         resized_masks = []
-        for frame, mask in zip(frames, masks, strict=True):
+        for frame in frames:
             rgb = self._cv2.cvtColor(frame, self._cv2.COLOR_BGR2RGB)
             rgb = self._cv2.resize(rgb, (self.input_width, self.input_height))
             resized_frames.append(rgb)
             resized_masks.append(
                 self._cv2.resize(
-                    mask,
+                    temporal_mask,
                     (self.input_width, self.input_height),
                     interpolation=self._cv2.INTER_NEAREST,
                 )

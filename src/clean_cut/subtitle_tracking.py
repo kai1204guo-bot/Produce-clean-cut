@@ -50,6 +50,7 @@ class TrackingConfig:
     minimum_iou: float = 0.35
     minimum_text_similarity: float = 0.55
     minimum_cue_duration_ms: int = 120
+    minimum_single_observation_confidence: float = 0.8
 
 
 def merge_frame_observations(
@@ -106,16 +107,16 @@ def _match_score(
 
 
 def _consensus(track: _Track) -> tuple[str, float]:
-    groups: dict[str, list[OcrObservation]] = {}
-    for observation in track.observations:
-        key = normalize_ocr_text(observation.text).casefold()
-        groups.setdefault(key, []).append(observation)
-    winner = max(
-        groups.values(),
-        key=lambda group: (sum(item.confidence for item in group), len(group)),
+    # OCR can repeat the same low-confidence mistake across adjacent near-identical
+    # frames. Prefer the engine's strongest reading instead of letting that repeated
+    # mistake outvote a single high-confidence observation.
+    representative = max(
+        track.observations,
+        key=lambda item: (item.confidence, len(normalize_ocr_text(item.text))),
     )
-    representative = max(winner, key=lambda item: item.confidence)
-    confidence = sum(item.confidence for item in winner) / len(winner)
+    confidence = sum(item.confidence for item in track.observations) / len(
+        track.observations
+    )
     return normalize_ocr_text(representative.text), confidence
 
 
@@ -153,6 +154,12 @@ def build_subtitle_cues(
     cues: list[SubtitleCue] = []
     for index, track in enumerate(ordered_tracks, start=1):
         text, confidence = _consensus(track)
+        if (
+            len(track.observations) == 1
+            and len(text) <= 1
+            and confidence < config.minimum_single_observation_confidence
+        ):
+            continue
         first = track.observations[0]
         last = track.observations[-1]
         natural_end = last.timestamp_ms + last.duration_ms
@@ -165,7 +172,7 @@ def build_subtitle_cues(
         end_ms = max(end_ms, first.timestamp_ms + config.minimum_cue_duration_ms)
         cues.append(
             SubtitleCue(
-                index=index,
+                index=len(cues) + 1,
                 start_ms=first.timestamp_ms,
                 end_ms=end_ms,
                 text=text,
