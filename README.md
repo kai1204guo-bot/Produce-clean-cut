@@ -11,10 +11,13 @@
 - 使用 RapidOCR 分析用户指定区域内的硬字幕；
 - 将跨帧OCR结果合并为字幕轨迹；
 - 从同一轮OCR生成SRT和逐帧多边形遮罩计划；
+- 将遮罩扩张、羽化，并为字幕淡入淡出增加前后保持；
+- 使用 OpenCV Telea 或 LaMa ONNX 修复硬字幕画面；
+- 通过 FFmpeg 输出 H.264 视频并复制原始音频；
 - 输出机器可读的任务报告；
-- 使用合成测试视频验证软字幕和硬字幕分析链路。
+- 使用合成测试视频验证软字幕、硬字幕分析和视频修复链路。
 
-STTN/LaMa画面修复将在后续阶段接入。
+当前修复实现是阶段 0 基线：仅接受恒定帧率（CFR）视频。OpenCV 后端无需模型、速度快但复杂背景质量有限；LaMa 质量更高，建议使用 NVIDIA CUDA。
 
 ## 环境要求
 
@@ -28,15 +31,31 @@ STTN/LaMa画面修复将在后续阶段接入。
 项目位于中文路径时，开发环境使用 `--no-install-project`，避免 Windows 可编辑安装路径的编码问题：
 
 ```powershell
-uv sync --python 3.11 --extra ocr --extra dev --no-install-project
+uv sync --python 3.11 --extra ocr --extra repair --extra dev --no-install-project
 $env:PYTHONPATH = "src"
 python -m clean_cut inspect "input.mp4"
 python -m clean_cut process "input.mkv" --output-dir "output"
 python -m clean_cut analyze-hard "input.mp4" --region "0,700,1920,300" --output-dir "output"
+python -m clean_cut repair "input.mp4" --plan "output/input_hard_subtitle_plan.json" --output "output/input.clean.mp4"
 ```
 
 `inspect` 只分析媒体；`process` 会根据字幕类型执行当前阶段支持的安全处理。文本软字幕将被提取为 SRT，同时生成移除字幕轨道后的清水视频。
 
 `analyze-hard` 按指定字幕区域抽帧并运行 RapidOCR，输出 SRT 和硬字幕计划 JSON。计划中的OCR文字轨迹与逐帧多边形遮罩来自同一轮识别，可供后续视频修复直接使用。
+
+## LaMa GPU 修复
+
+Windows + NVIDIA 显卡可安装 CUDA 版 ONNX Runtime。依赖固定在 `<1.27`，对应 CUDA 12 系列，避免新版 wheel 切换到 CUDA 13 后造成环境不兼容：
+
+```powershell
+uv sync --python 3.11 --extra ocr-gpu --extra dev --no-install-project
+$env:PYTHONPATH = "src"
+python -m clean_cut download-lama ".clean-cut-models/lama_fp32.onnx"
+python -m clean_cut repair "input.mp4" --plan "output/input_hard_subtitle_plan.json" --output "output/input.clean.mp4" --backend lama --model ".clean-cut-models/lama_fp32.onnx" --device cuda
+```
+
+下载器会校验 SHA-256；模型不会写入 Git。CPU 环境也可将 `--device` 改为 `cpu`，但逐帧 LaMa 会明显较慢。模型来源、许可证与固定哈希见 [MODEL_MANIFEST.md](MODEL_MANIFEST.md)。
+
+输出文件已存在时程序会拒绝覆盖。修复前也会检查计划路径、画面尺寸和帧率类型，避免用错计划或让 VFR 视频产生字幕时间漂移。
 
 完整技术规划见 [TECHNICAL_PLAN.md](TECHNICAL_PLAN.md)。

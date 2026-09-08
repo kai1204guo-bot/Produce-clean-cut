@@ -29,6 +29,7 @@ class MediaStream:
     subtitle_kind: SubtitleKind | None = None
     width: int | None = None
     height: int | None = None
+    r_frame_rate: str | None = None
     avg_frame_rate: str | None = None
     time_base: str | None = None
 
@@ -78,4 +79,3 @@ class ProcessingReport:
             "subtitle_files": [str(path) for path in self.subtitle_files],
             "warnings": self.warnings,
         }
-

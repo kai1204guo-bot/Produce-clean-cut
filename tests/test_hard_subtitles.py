@@ -8,7 +8,14 @@ from unittest import TestCase, skipUnless
 
 from clean_cut.hard_subtitles import analyze_hard_subtitles, build_mask_keyframes
 from clean_cut.ocr import OcrBackend
-from clean_cut.subtitle_data import OcrObservation, Point, Polygon, Region
+from clean_cut.subtitle_data import (
+    HardSubtitlePlan,
+    MaskKeyframe,
+    OcrObservation,
+    Point,
+    Polygon,
+    Region,
+)
 
 HAS_FFMPEG = shutil.which("ffmpeg") is not None and shutil.which("ffprobe") is not None
 
@@ -46,6 +53,20 @@ class FixedOcrBackend(OcrBackend):
 
 
 class HardSubtitlePlanTests(TestCase):
+    def test_plan_json_data_round_trips(self) -> None:
+        polygon = Polygon((Point(1, 2), Point(4, 2), Point(4, 6), Point(1, 6)))
+        plan = HardSubtitlePlan(
+            schema_version=1,
+            source="sample.mp4",
+            video_width=1920,
+            video_height=1080,
+            sampling_interval_ms=250,
+            ocr_backend="test",
+            region=Region(0, 700, 1920, 300),
+            mask_keyframes=[MaskKeyframe(2, 500, (polygon,))],
+        )
+        self.assertEqual(HardSubtitlePlan.from_dict(plan.to_dict()).to_dict(), plan.to_dict())
+
     def test_groups_polygons_into_mask_keyframes(self) -> None:
         polygon = Polygon(
             (Point(1, 1), Point(10, 1), Point(10, 5), Point(1, 5))

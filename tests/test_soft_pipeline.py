@@ -55,6 +55,8 @@ class SoftSubtitlePipelineTests(TestCase):
                     "aac",
                     "-c:s",
                     "srt",
+                    "-t",
+                    "2",
                     "-shortest",
                     str(source),
                 ],

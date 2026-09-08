@@ -1,8 +1,8 @@
 from pathlib import Path
 from unittest import TestCase
 
-from clean_cut.media import classify_subtitle_codec, parse_probe
-from clean_cut.models import ProcessingRoute, SubtitleKind
+from clean_cut.media import classify_subtitle_codec, has_variable_frame_rate, parse_probe
+from clean_cut.models import MediaStream, ProcessingRoute, SubtitleKind
 
 
 class SubtitleClassificationTests(TestCase):
@@ -39,3 +39,8 @@ class SubtitleClassificationTests(TestCase):
         info = parse_probe(Path("sample.mp4"), payload)
         self.assertEqual(info.route, ProcessingRoute.POSSIBLE_HARD_SUBTITLE)
 
+    def test_detects_variable_frame_rate_from_probe_rates(self) -> None:
+        cfr = MediaStream(0, "video", "h264", r_frame_rate="25/1", avg_frame_rate="25/1")
+        vfr = MediaStream(0, "video", "h264", r_frame_rate="30/1", avg_frame_rate="24/1")
+        self.assertFalse(has_variable_frame_rate(cfr))
+        self.assertTrue(has_variable_frame_rate(vfr))

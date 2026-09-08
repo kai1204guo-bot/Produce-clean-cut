@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
@@ -87,6 +88,7 @@ def _stream_from_probe(data: dict[str, Any]) -> MediaStream:
         subtitle_kind=subtitle_kind,
         width=_optional_int(data.get("width")),
         height=_optional_int(data.get("height")),
+        r_frame_rate=data.get("r_frame_rate"),
         avg_frame_rate=data.get("avg_frame_rate"),
         time_base=data.get("time_base"),
     )
@@ -145,3 +147,16 @@ def probe_media(source: Path) -> MediaInfo:
         raise MediaProbeError("ffprobe 返回了无效的 JSON 数据。") from exc
     return parse_probe(source, payload)
 
+
+def has_variable_frame_rate(stream: MediaStream, *, tolerance: float = 0.01) -> bool:
+    """Use ffprobe's nominal and average rates as a conservative VFR signal."""
+    if stream.codec_type != "video":
+        return False
+    try:
+        nominal = float(Fraction(stream.r_frame_rate or "0/1"))
+        average = float(Fraction(stream.avg_frame_rate or "0/1"))
+    except (ValueError, ZeroDivisionError):
+        return True
+    if nominal <= 0 or average <= 0:
+        return True
+    return abs(nominal - average) / nominal > tolerance

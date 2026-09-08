@@ -90,3 +90,32 @@ class HardSubtitlePlan:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> HardSubtitlePlan:
+        region = Region(**data["region"])
+        cues = [SubtitleCue(**cue) for cue in data.get("cues", [])]
+        keyframes = []
+        for keyframe in data.get("mask_keyframes", []):
+            polygons = tuple(
+                Polygon(tuple(Point(**point) for point in polygon["points"]))
+                for polygon in keyframe.get("polygons", [])
+            )
+            keyframes.append(
+                MaskKeyframe(
+                    frame_index=keyframe["frame_index"],
+                    timestamp_ms=keyframe["timestamp_ms"],
+                    polygons=polygons,
+                )
+            )
+        return cls(
+            schema_version=data["schema_version"],
+            source=data["source"],
+            video_width=data["video_width"],
+            video_height=data["video_height"],
+            sampling_interval_ms=data["sampling_interval_ms"],
+            ocr_backend=data["ocr_backend"],
+            region=region,
+            cues=cues,
+            mask_keyframes=keyframes,
+        )

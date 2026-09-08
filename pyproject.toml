@@ -13,8 +13,15 @@ authors = [{ name = "Produce Clean Cut contributors" }]
 dependencies = []
 
 [project.optional-dependencies]
+repair = [
+    "opencv-python>=4.10,<6",
+]
 ocr = [
-    "onnxruntime>=1.22,<2",
+    "onnxruntime>=1.22,<1.27",
+    "rapidocr>=3.8,<4",
+]
+ocr-gpu = [
+    "onnxruntime-gpu[cuda,cudnn]>=1.22,<1.27",
     "rapidocr>=3.8,<4",
 ]
 dev = [

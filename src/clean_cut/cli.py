@@ -7,10 +7,14 @@ from pathlib import Path
 
 from clean_cut.errors import CleanCutError
 from clean_cut.hard_subtitles import analyze_hard_subtitles
+from clean_cut.inpaint import LamaOnnxBackend, OpenCvInpaintBackend
+from clean_cut.masks import MaskRenderConfig
 from clean_cut.media import probe_media
+from clean_cut.model_store import download_lama_model
 from clean_cut.ocr import RapidOcrBackend
 from clean_cut.pipeline import process_media
 from clean_cut.subtitle_data import Region
+from clean_cut.video_repair import load_hard_subtitle_plan, repair_video
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -47,6 +51,38 @@ def build_parser() -> argparse.ArgumentParser:
         default=250,
         help="OCR抽帧间隔，默认250毫秒",
     )
+
+    repair_parser = subparsers.add_parser("repair", help="根据硬字幕计划修复视频")
+    repair_parser.add_argument("source", type=Path, help="输入视频路径")
+    repair_parser.add_argument("--plan", type=Path, required=True, help="硬字幕计划JSON")
+    repair_parser.add_argument("--output", type=Path, required=True, help="清水视频输出路径")
+    repair_parser.add_argument(
+        "--backend",
+        choices=("opencv", "lama"),
+        default="opencv",
+        help="修复后端，默认opencv",
+    )
+    repair_parser.add_argument("--model", type=Path, help="LaMa ONNX模型路径")
+    repair_parser.add_argument(
+        "--device",
+        choices=("cpu", "cuda"),
+        default="cpu",
+        help="LaMa运行设备，默认cpu",
+    )
+    repair_parser.add_argument("--dilation", type=int, default=8, help="遮罩扩张像素")
+    repair_parser.add_argument("--feather", type=int, default=4, help="遮罩羽化像素")
+    repair_parser.add_argument("--hold-before-ms", type=int, default=120)
+    repair_parser.add_argument("--hold-after-ms", type=int, default=120)
+    repair_parser.add_argument("--crf", type=int, default=18, help="H.264输出CRF")
+
+    model_parser = subparsers.add_parser("download-lama", help="下载并校验OpenCV LaMa模型")
+    model_parser.add_argument("destination", type=Path, help="模型保存路径")
+    model_parser.add_argument(
+        "--variant",
+        choices=("fp32", "opencv-quantized"),
+        default="fp32",
+        help="默认下载支持CUDA的FP32版本",
+    )
     return parser
 
 
@@ -66,7 +102,7 @@ def main(argv: list[str] | None = None) -> int:
             result = probe_media(args.source).to_dict()
         elif args.command == "process":
             result = process_media(args.source, args.output_dir).to_dict()
-        else:
+        elif args.command == "analyze-hard":
             backend = RapidOcrBackend()
             result = analyze_hard_subtitles(
                 args.source,
@@ -75,6 +111,43 @@ def main(argv: list[str] | None = None) -> int:
                 backend=backend,
                 interval_ms=args.interval_ms,
             ).to_dict()
+        elif args.command == "repair":
+            plan = load_hard_subtitle_plan(args.plan)
+            if args.backend == "lama":
+                if args.model is None:
+                    parser.error("使用lama后端时必须提供--model")
+                repair_backend = LamaOnnxBackend(
+                    args.model,
+                    use_gpu=args.device == "cuda",
+                )
+            else:
+                repair_backend = OpenCvInpaintBackend()
+            result = {
+                "output": str(
+                    repair_video(
+                        args.source,
+                        args.output,
+                        plan,
+                        repair_backend,
+                        mask_config=MaskRenderConfig(
+                            dilation_px=args.dilation,
+                            feather_px=args.feather,
+                            hold_before_ms=args.hold_before_ms,
+                            hold_after_ms=args.hold_after_ms,
+                        ),
+                        crf=args.crf,
+                    )
+                ),
+                "backend": args.backend,
+                "status": "completed",
+            }
+        else:
+            result = {
+                "model": str(
+                    download_lama_model(args.destination, variant=args.variant)
+                ),
+                "status": "completed",
+            }
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
     except CleanCutError as exc:
