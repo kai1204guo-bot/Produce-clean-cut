@@ -238,7 +238,11 @@ class LibTvWebBatchRunner:
                     continue
                 output_node = self._canvas_node_by_ids(page, output_ids)
                 if output_node is None:
+                    self._fit_canvas_to_screen(page)
+                    output_node = self._canvas_node_by_ids(page, output_ids)
+                if output_node is None:
                     self._reload_canvas(page)
+                    self._fit_canvas_to_screen(page)
                     output_node = self._canvas_node_by_ids(page, output_ids)
                 if output_node is None:
                     self._set(manifest, job, JobState.GENERATING, "结果节点同步中")
@@ -331,14 +335,32 @@ class LibTvWebBatchRunner:
         node_ids: dict[str, list[str]],
         error_message: str,
     ) -> None:
-        node = self._canvas_node_by_ids(page, node_ids.get(name, []))
+        ids = node_ids.get(name, [])
+        node = self._canvas_node_by_ids(page, ids)
         if node is not None:
             node.dispatch_event("click")
             return
 
+        if ids:
+            self._fit_canvas_to_screen(page)
+            node = self._canvas_node_by_ids(page, ids)
+            if node is not None:
+                node.dispatch_event("click")
+                return
+
         # The CLI is authoritative for existence, while this fallback keeps the app usable
         # if an older LibTV canvas omits data-id from its rendered React Flow node.
         self._select_canvas_node(page.get_by_text(name, exact=True), error_message)
+
+    @staticmethod
+    def _fit_canvas_to_screen(page) -> None:
+        zoom_options = page.get_by_role("button", name="缩放选项")
+        zoom_options.wait_for(state="attached", timeout=30_000)
+        zoom_options.dispatch_event("click")
+        fit_screen = page.get_by_role("menuitem").filter(has_text=re.compile(r"^适合屏幕"))
+        fit_screen.wait_for(state="visible", timeout=30_000)
+        fit_screen.dispatch_event("click")
+        page.wait_for_timeout(2_000)
 
     def _video_node_ids_by_name(self) -> dict[str, list[str]]:
         try:
