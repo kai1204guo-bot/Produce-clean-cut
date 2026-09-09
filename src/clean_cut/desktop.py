@@ -3,8 +3,10 @@ from __future__ import annotations
 import os
 import queue
 import sys
+import tempfile
 import threading
 import tkinter as tk
+import traceback
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
@@ -304,21 +306,40 @@ class CleanCutApp(tk.Tk):
             callback(job)
             try:
                 transcriber.write_srt(job.source_path, destination, language="en")
-            except CleanCutError:
+            except CleanCutError as first_error:
                 if device != "auto" or active_device != "cuda":
                     raise
-                active_device = "cpu"
-                job.message = "GPU 运行库不可用，已自动切换 CPU 生成 SRT"
+                job.message = "GPU 首次转写失败，正在重新初始化并重试"
                 callback(job)
-                transcriber = FasterWhisperTranscriber(
-                    model="turbo", device="cpu", compute_type="int8"
-                )
-                transcriber.write_srt(job.source_path, destination, language="en")
+                try:
+                    transcriber = FasterWhisperTranscriber(
+                        model="turbo", device="cuda", compute_type="float16"
+                    )
+                    transcriber.write_srt(job.source_path, destination, language="en")
+                except CleanCutError as retry_error:
+                    active_device = "cpu"
+                    self._write_gpu_error(first_error, retry_error)
+                    job.message = "GPU 连续失败，已切换 CPU；详细原因已写入日志"
+                    callback(job)
+                    transcriber = FasterWhisperTranscriber(
+                        model="turbo", device="cpu", compute_type="int8"
+                    )
+                    transcriber.write_srt(job.source_path, destination, language="en")
             job.message = "SRT 完成，等待清水版"
             if job.state == JobState.ERROR:
                 job.state = JobState.PENDING
             manifest.save()
             callback(job)
+
+    @staticmethod
+    def _write_gpu_error(first_error: Exception, retry_error: Exception) -> None:
+        base = Path(os.environ.get("LOCALAPPDATA", tempfile.gettempdir()))
+        log_path = base / "ProduceCleanCut" / "gpu-error.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        log_path.write_text(
+            f"首次错误：{first_error}\n重试错误：{retry_error}\n",
+            encoding="utf-8",
+        )
 
     def _request_stop(self) -> None:
         self._stop_event.set()
@@ -363,6 +384,26 @@ class CleanCutApp(tk.Tk):
 
 
 def main() -> None:
+    if "--gpu-smoke-test" in sys.argv:
+        source_index = sys.argv.index("--gpu-smoke-test") + 1
+        log_path = Path(os.environ["LOCALAPPDATA"]) / "ProduceCleanCut" / "gpu-test.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            source = Path(sys.argv[source_index])
+            with tempfile.TemporaryDirectory(prefix="clean-cut-gpu-") as temp_dir:
+                transcriber = FasterWhisperTranscriber(
+                    model="turbo", device="cuda", compute_type="float16"
+                )
+                output = Path(temp_dir) / "gpu-test.srt"
+                transcriber.write_srt(source, output, language="en")
+                log_path.write_text(
+                    f"GPU_OK\nsource={source}\nbytes={output.stat().st_size}\n",
+                    encoding="utf-8",
+                )
+        except Exception:
+            log_path.write_text(traceback.format_exc(), encoding="utf-8")
+            raise
+        return
     app = CleanCutApp()
     if "--smoke-test" in sys.argv:
         app.update_idletasks()

@@ -4,6 +4,7 @@ __pycache__/
 .ruff_cache/
 .venv/
 dist/
+dist-*/
 build/
 *.egg-info/
 .clean-cut-work/
