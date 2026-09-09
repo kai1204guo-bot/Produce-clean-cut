@@ -71,3 +71,37 @@ def test_placeholder_node_has_not_started() -> None:
 
     assert make_runner()._media_url_from_details(details) == ""
     assert not make_runner()._output_has_started(details)
+
+
+def test_active_cloud_task_count_ignores_completed_and_source_nodes() -> None:
+    runner = make_runner()
+    running = {
+        "data": {
+            "url": [],
+            "taskInfo": {"taskId": "task-running", "loading": True, "status": 1},
+        }
+    }
+    completed = {
+        "data": {
+            "url": ["https://example.test/clean.mp4"],
+            "taskInfo": {"taskId": "task-done", "loading": False, "status": 2},
+        }
+    }
+
+    with (
+        patch.object(
+            runner,
+            "_video_node_ids_by_name",
+            return_value={
+                "EP1": ["source"],
+                "视频一键去字幕-EP1": ["running"],
+                "视频一键去字幕-EP2": ["completed"],
+            },
+        ),
+        patch.object(
+            runner,
+            "_canvas_node_details",
+            side_effect=lambda node_id: {"running": running, "completed": completed}[node_id],
+        ),
+    ):
+        assert runner._active_cloud_task_count() == 1

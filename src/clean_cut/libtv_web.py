@@ -26,6 +26,7 @@ class LibTvWebBatchRunner:
         project_url: str,
         profile_dir: Path,
         batch_size: int = 15,
+        max_cloud_concurrency: int = 7,
         status_callback: StatusCallback | None = None,
         stop_requested: Callable[[], bool] | None = None,
     ) -> None:
@@ -38,6 +39,7 @@ class LibTvWebBatchRunner:
         self.project_id = project_ids[0]
         self.profile_dir = profile_dir.resolve()
         self.batch_size = batch_size
+        self.max_cloud_concurrency = max_cloud_concurrency
         self.status_callback = status_callback or (lambda _job: None)
         self.stop_requested = stop_requested or (lambda: False)
 
@@ -207,6 +209,7 @@ class LibTvWebBatchRunner:
                 self._reload_canvas(page)
                 node_ids = self._video_node_ids_by_name()
                 self._set(manifest, job, JobState.UPLOADED, "已清理未启动节点，正在重新提交")
+            self._wait_for_cloud_slot(page, manifest, job)
             while True:
                 self._select_named_canvas_node(
                     page,
@@ -403,6 +406,38 @@ class LibTvWebBatchRunner:
         for _ in range(seconds):
             self._check_stop()
             page.wait_for_timeout(1_000)
+
+    def _wait_for_cloud_slot(self, page, manifest: BatchManifest, job: BatchJob) -> None:
+        while True:
+            self._check_stop()
+            active = self._active_cloud_task_count()
+            if active < self.max_cloud_concurrency:
+                return
+            self._set(
+                manifest,
+                job,
+                JobState.UPLOADED,
+                f"云端并发 {active}/{self.max_cloud_concurrency}，等待空闲名额",
+            )
+            self._wait_before_submit_retry(page, seconds=10)
+
+    def _active_cloud_task_count(self) -> int:
+        node_ids = self._video_node_ids_by_name()
+        active = 0
+        for name, ids in node_ids.items():
+            if not name.startswith("视频一键去字幕-"):
+                continue
+            for node_id in ids:
+                details = self._canvas_node_details(node_id)
+                data = details.get("data", {})
+                task_info = data.get("taskInfo", {})
+                if (
+                    task_info.get("taskId")
+                    and not self._media_url_from_details(details)
+                    and (task_info.get("loading") or task_info.get("status") in {0, 1})
+                ):
+                    active += 1
+        return active
 
     @staticmethod
     def _dismiss_concurrency_modal(page) -> bool:
