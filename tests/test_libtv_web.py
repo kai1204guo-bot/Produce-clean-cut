@@ -29,6 +29,32 @@ def test_canvas_url_requires_project_id() -> None:
         )
 
 
+def test_create_project_url_uses_requested_workspace() -> None:
+    completed = type(
+        "Completed", (), {"stdout": json.dumps({"uuid": "new-project-uuid"})}
+    )()
+
+    with patch("clean_cut.libtv_web.subprocess.run", return_value=completed) as run:
+        url = LibTvWebBatchRunner.create_project_url(
+            "BITE CLUB", workspace_id=7887875
+        )
+
+    assert url == (
+        "https://www.liblib.tv/canvas?"
+        "spaceId=7887875&projectId=new-project-uuid"
+    )
+    assert run.call_args.args[0] == [
+        "libtv",
+        "project",
+        "create",
+        "BITE CLUB",
+        "-d",
+        "清水版批量制作自动创建",
+        "-w",
+        "7887875",
+    ]
+
+
 def test_video_node_ids_are_grouped_by_exact_name() -> None:
     payload = {
         "nodes": [

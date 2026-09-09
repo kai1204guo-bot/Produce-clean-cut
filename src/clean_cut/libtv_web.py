@@ -49,6 +49,30 @@ class LibTvWebBatchRunner:
         self.stop_requested = stop_requested or (lambda: False)
         self.last_failed_jobs: list[str] = []
 
+    @classmethod
+    def create_project_url(cls, name: str, *, workspace_id: int) -> str:
+        payload = cls._run_libtv_json(
+            [
+                "project",
+                "create",
+                name,
+                "-d",
+                "清水版批量制作自动创建",
+                "-w",
+                str(workspace_id),
+            ],
+            timeout=120,
+        )
+        project_id = payload.get("uuid") or payload.get("projectUuid")
+        if not isinstance(project_id, str) or not re.fullmatch(
+            r"[A-Za-z0-9_-]+", project_id
+        ):
+            raise MediaProcessError("LibTV 已创建画布，但没有返回有效的画布 UUID。")
+        return (
+            "https://www.liblib.tv/canvas?"
+            f"spaceId={workspace_id}&projectId={project_id}"
+        )
+
     def run(
         self,
         manifest: BatchManifest,

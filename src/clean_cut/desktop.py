@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import queue
+import re
 import sys
 import tempfile
 import threading
@@ -24,6 +25,11 @@ from clean_cut.libtv_web import LibTvWebBatchRunner
 from clean_cut.tools import write_text_atomically
 
 PROJECT_URL_FILE = ".clean-cut-project-url.txt"
+DEFAULT_WORKSPACE_ID = 7887875
+LOGIN_FALLBACK_URL = (
+    "https://www.liblib.tv/canvas?"
+    "spaceId=7887875&projectId=a282f30b20a04d8aac4e32d20f901f73"
+)
 
 
 class CleanCutApp(tk.Tk):
@@ -173,7 +179,7 @@ class CleanCutApp(tk.Tk):
         self._load_rows(videos)
         if not self.project_var.get():
             self.summary_var.set(
-                f"已找到 {len(videos)} 集；请粘贴这部剧自己的 LibTV 画布网址"
+                f"已找到 {len(videos)} 集；开始时会为这部剧自动创建 LibTV 画布"
             )
 
     def _choose_dir(self, variable: tk.StringVar) -> None:
@@ -199,9 +205,11 @@ class CleanCutApp(tk.Tk):
         base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
         return base / "ProduceCleanCut" / "libtv-profile"
 
-    def _make_runner(self, callback=None) -> LibTvWebBatchRunner:
+    def _make_runner(
+        self, callback=None, *, project_url: str | None = None
+    ) -> LibTvWebBatchRunner:
         return LibTvWebBatchRunner(
-            project_url=self.project_var.get().strip(),
+            project_url=project_url or self.project_var.get().strip(),
             profile_dir=self._profile_dir(),
             batch_size=self.batch_var.get(),
             status_callback=callback,
@@ -211,7 +219,9 @@ class CleanCutApp(tk.Tk):
     def _open_login(self) -> None:
         def work() -> None:
             try:
-                self._make_runner().open_login()
+                self._make_runner(
+                    project_url=self.project_var.get().strip() or LOGIN_FALLBACK_URL
+                ).open_login()
                 self._events.put(("info", "LibTV 登录窗口已关闭，登录状态会保留。"))
             except Exception as exc:
                 self._events.put(("error", str(exc)))
@@ -233,6 +243,25 @@ class CleanCutApp(tk.Tk):
         clean.mkdir(parents=True, exist_ok=True)
         self._load_rows(videos)
         manifest = BatchManifest.load_or_create(clean / ".clean-cut-state.json", videos)
+        if not self.project_var.get().strip():
+            series_name = re.sub(
+                r"^\s*成片[\s_-]*", "", source.parent.name, flags=re.IGNORECASE
+            ).strip()
+            if series_name.casefold() in {"成片", "videos", "video"}:
+                series_name = source.name.strip()
+            try:
+                project_url = LibTvWebBatchRunner.create_project_url(
+                    series_name, workspace_id=DEFAULT_WORKSPACE_ID
+                )
+            except Exception as exc:
+                messagebox.showerror(
+                    "创建 LibTV 画布失败",
+                    f"无法为《{series_name}》自动创建画布：{exc}\n\n"
+                    "请先点击“登录 LibTV”刷新官方 CLI 授权。",
+                )
+                return
+            self.project_var.set(project_url)
+            self.summary_var.set(f"已自动创建《{series_name}》专用画布")
         self._stop_event.clear()
         self.start_button.configure(state="disabled")
         self.stop_button.configure(state="normal")
