@@ -48,3 +48,26 @@ def test_video_node_ids_are_grouped_by_exact_name() -> None:
     }
     assert run.call_args.args[0] == ["libtv", "node", "list", "-p", PROJECT_ID]
 
+
+def test_completed_node_exposes_direct_media_url() -> None:
+    details = {
+        "data": {
+            "url": ["https://example.test/clean.mp4"],
+            "taskInfo": {"taskId": "task-1", "status": 2, "progressPercent": 100},
+        }
+    }
+
+    assert make_runner()._media_url_from_details(details) == "https://example.test/clean.mp4"
+    assert make_runner()._output_has_started(details)
+
+
+def test_placeholder_node_has_not_started() -> None:
+    details = {
+        "data": {
+            "url": [],
+            "taskInfo": {"taskId": "", "loading": True, "status": 0},
+        }
+    }
+
+    assert make_runner()._media_url_from_details(details) == ""
+    assert not make_runner()._output_has_started(details)

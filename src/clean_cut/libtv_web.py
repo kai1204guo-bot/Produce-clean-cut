@@ -196,13 +196,24 @@ class LibTvWebBatchRunner:
         return bool(node_ids.get(job.source_path.stem))
 
     def _submit_all(self, page, manifest: BatchManifest, jobs: list[BatchJob]) -> None:
-        node_ids = self._video_node_ids_by_name()
         for job in jobs:
             self._check_stop()
+            node_ids = self._video_node_ids_by_name()
             output_name = f"视频一键去字幕-{job.source_path.stem}"
-            if node_ids.get(output_name):
-                self._set(manifest, job, JobState.SUBMITTED, "画布任务已存在")
-                continue
+            output_ids = node_ids.get(output_name, [])
+            if output_ids:
+                started = any(
+                    self._output_has_started(self._canvas_node_details(output_id))
+                    for output_id in output_ids
+                )
+                if started:
+                    self._set(manifest, job, JobState.SUBMITTED, "画布任务已存在")
+                    continue
+                for output_id in output_ids:
+                    self._delete_unstarted_output(output_id)
+                self._reload_canvas(page)
+                node_ids = self._video_node_ids_by_name()
+                self._set(manifest, job, JobState.UPLOADED, "已清理未启动节点，正在重新提交")
             self._select_named_canvas_node(
                 page,
                 job.source_path.stem,
@@ -221,6 +232,19 @@ class LibTvWebBatchRunner:
                 raise MediaProcessError(f"无法唯一识别 {job.source_path.name} 的生成按钮。")
             self._set(manifest, job, JobState.SUBMITTING, "正在提交，禁止自动重试")
             generate.dispatch_event("click")
+            output_id = self._wait_for_output_id(output_name)
+            if output_id is None:
+                raise MediaProcessError(
+                    f"{job.source_path.name} 的提交结果无法确认；为避免重复扣费，已停止。"
+                )
+            details = self._canvas_node_details(output_id)
+            if not self._output_has_started(details):
+                details = self._wait_for_output_started(output_id)
+            if details is None:
+                raise MediaProcessError(
+                    f"{job.source_path.name} 的生成状态无法确认；"
+                    "为避免重复扣费，已停止且不会自动重试。"
+                )
             self._set(manifest, job, JobState.SUBMITTED, "已提交云端任务")
 
     def _wait_and_download(
@@ -236,53 +260,39 @@ class LibTvWebBatchRunner:
                 if not output_ids:
                     self._set(manifest, job, JobState.GENERATING, "等待云端创建任务节点")
                     continue
-                output_node = self._canvas_node_by_ids(page, output_ids)
-                if output_node is None:
-                    self._fit_canvas_to_screen(page)
-                    output_node = self._canvas_node_by_ids(page, output_ids)
-                if output_node is None:
-                    self._reload_canvas(page)
-                    self._fit_canvas_to_screen(page)
-                    output_node = self._canvas_node_by_ids(page, output_ids)
-                if output_node is None:
-                    self._set(manifest, job, JobState.GENERATING, "结果节点同步中")
+                details = self._canvas_node_details(output_ids[0])
+                media_url = self._media_url_from_details(details)
+                if media_url:
+                    self._download_one(context, manifest, job, clean_dir, media_url)
+                    remaining.remove(job)
                     continue
-                text = output_node.inner_text()
-                if "生成中" in text:
-                    match = re.search(r"生成中\s*(\d+)%", text)
-                    progress = int(match.group(1)) if match else job.progress
-                    self._set(manifest, job, JobState.GENERATING, f"生成中 {progress}%", progress)
+                task_info = details.get("data", {}).get("taskInfo", {})
+                if not task_info.get("taskId"):
+                    raise MediaProcessError(
+                        f"{job.source_path.name} 的去字幕节点尚未开始生成；"
+                        "程序已停止，请重新开始任务。"
+                    )
+                progress = int(task_info.get("progressPercent") or job.progress)
+                if task_info.get("loading") or progress < 100:
+                    self._set(
+                        manifest, job, JobState.GENERATING, f"生成中 {progress}%", progress
+                    )
                     continue
-                self._download_one(
-                    page, context, manifest, job, clean_dir, output_name, node_ids
+                raise MediaProcessError(
+                    f"{job.source_path.name} 的云端任务已结束，但未返回视频地址。"
                 )
-                remaining.remove(job)
             if remaining:
                 time.sleep(10)
 
     def _download_one(
         self,
-        page,
         context,
         manifest,
         job,
         clean_dir: Path,
-        output_name: str,
-        node_ids: dict[str, list[str]],
+        media_url: str,
     ) -> None:
         self._set(manifest, job, JobState.DOWNLOADING, "正在下载清水版")
-        self._select_named_canvas_node(
-            page,
-            output_name,
-            node_ids,
-            f"{job.source_path.name} 的去字幕结果节点不存在或不唯一。",
-        )
-        video = page.locator("video:visible").first
-        video.wait_for(state="visible", timeout=60_000)
-        media_url = video.evaluate("element => element.currentSrc || element.src")
-        if not media_url:
-            raise MediaProcessError(f"{job.source_path.name} 未找到下载地址。")
-
         output = clean_dir / f"{episode_stem(job.source_path)}-清水版.mp4"
         cookies = context.cookies([media_url])
         cookie_header = "; ".join(f"{item['name']}={item['value']}" for item in cookies)
@@ -334,23 +344,81 @@ class LibTvWebBatchRunner:
         name: str,
         node_ids: dict[str, list[str]],
         error_message: str,
-    ) -> None:
+    ):
         ids = node_ids.get(name, [])
         node = self._canvas_node_by_ids(page, ids)
         if node is not None:
             node.dispatch_event("click")
-            return
+            return node
 
         if ids:
             self._fit_canvas_to_screen(page)
             node = self._canvas_node_by_ids(page, ids)
             if node is not None:
                 node.dispatch_event("click")
-                return
+                return node
 
         # The CLI is authoritative for existence, while this fallback keeps the app usable
         # if an older LibTV canvas omits data-id from its rendered React Flow node.
         self._select_canvas_node(page.get_by_text(name, exact=True), error_message)
+        label = page.get_by_text(name, exact=True).first
+        return label.locator("xpath=ancestor::*[contains(@class,'react-flow__node')][1]")
+
+    def _ensure_canvas_node(self, page, node_ids: list[str]):
+        node = self._canvas_node_by_ids(page, node_ids)
+        if node is not None:
+            return node
+        self._fit_canvas_to_screen(page)
+        node = self._canvas_node_by_ids(page, node_ids)
+        if node is not None:
+            return node
+        self._reload_canvas(page)
+        self._fit_canvas_to_screen(page)
+        return self._canvas_node_by_ids(page, node_ids)
+
+    def _wait_for_output_id(self, output_name: str) -> str | None:
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            self._check_stop()
+            node_ids = self._video_node_ids_by_name().get(output_name, [])
+            if node_ids:
+                return node_ids[0]
+            time.sleep(1)
+        return None
+
+    def _wait_for_output_started(self, output_id: str) -> dict | None:
+        deadline = time.monotonic() + 60
+        while time.monotonic() < deadline:
+            self._check_stop()
+            details = self._canvas_node_details(output_id)
+            if self._output_has_started(details):
+                return details
+            time.sleep(1)
+        return None
+
+    def _delete_unstarted_output(self, output_id: str) -> None:
+        details = self._canvas_node_details(output_id)
+        if self._output_has_started(details):
+            raise MediaProcessError("拒绝删除已经开始生成的 LibTV 节点。")
+        self._run_libtv_json(
+            ["node", "delete", output_id, "-p", self.project_id], timeout=60
+        )
+
+    @staticmethod
+    def _media_url_from_details(details: dict) -> str:
+        urls = details.get("data", {}).get("url", [])
+        if isinstance(urls, str) and urls:
+            return urls
+        if isinstance(urls, list):
+            for url in urls:
+                if isinstance(url, str) and url:
+                    return url
+        return ""
+
+    @classmethod
+    def _output_has_started(cls, details: dict) -> bool:
+        task_info = details.get("data", {}).get("taskInfo", {})
+        return bool(task_info.get("taskId") or cls._media_url_from_details(details))
 
     @staticmethod
     def _fit_canvas_to_screen(page) -> None:
@@ -363,22 +431,9 @@ class LibTvWebBatchRunner:
         page.wait_for_timeout(2_000)
 
     def _video_node_ids_by_name(self) -> dict[str, list[str]]:
-        try:
-            completed = subprocess.run(
-                ["libtv", "node", "list", "-p", self.project_id],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                check=True,
-                timeout=60,
-                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-            )
-            payload = json.loads(completed.stdout)
-        except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
-            raise MediaProcessError(
-                "无法读取 LibTV 官方节点列表，请确认 LibTV CLI 已登录后重试。"
-            ) from exc
+        payload = self._run_libtv_json(
+            ["node", "list", "-p", self.project_id], timeout=60
+        )
 
         result: dict[str, list[str]] = {}
         for node in payload.get("nodes", []):
@@ -389,6 +444,33 @@ class LibTvWebBatchRunner:
             if isinstance(name, str) and isinstance(node_id, str):
                 result.setdefault(name, []).append(node_id)
         return result
+
+    def _canvas_node_details(self, node_id: str) -> dict:
+        return self._run_libtv_json(
+            ["node", node_id, "-p", self.project_id], timeout=60
+        )
+
+    @staticmethod
+    def _run_libtv_json(arguments: list[str], *, timeout: float | None) -> dict:
+        try:
+            completed = subprocess.run(
+                ["libtv", *arguments],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=True,
+                timeout=timeout,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            payload = json.loads(completed.stdout)
+        except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+            raise MediaProcessError(
+                "LibTV 官方 CLI 执行失败，请确认 CLI 已登录且网络正常后重试。"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise MediaProcessError("LibTV 官方 CLI 返回了无法识别的数据。")
+        return payload
 
     def _set(
         self,
