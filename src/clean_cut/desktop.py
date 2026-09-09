@@ -252,9 +252,25 @@ class CleanCutApp(tk.Tk):
                 if srt_enabled:
                     srt_worker = threading.Thread(target=generate_srt, daemon=True)
                     srt_worker.start()
-                runner.run(
-                    manifest, clean_dir=clean, skip_existing=self.skip_var.get()
-                )
+                while True:
+                    runner.run(
+                        manifest, clean_dir=clean, skip_existing=self.skip_var.get()
+                    )
+                    if not runner.last_failed_jobs or self._stop_event.is_set():
+                        break
+                    failed = "、".join(runner.last_failed_jobs)
+                    retry_answer: queue.Queue[bool] = queue.Queue(maxsize=1)
+                    self._events.put(("retry_prompt", (failed, retry_answer)))
+                    while not self._stop_event.is_set():
+                        try:
+                            retry = retry_answer.get(timeout=0.2)
+                            break
+                        except queue.Empty:
+                            continue
+                    else:
+                        retry = False
+                    if not retry:
+                        break
                 if srt_worker:
                     srt_worker.join()
                 if srt_errors:
@@ -387,6 +403,18 @@ class CleanCutApp(tk.Tk):
             elif kind == "done":
                 self.summary_var.set(str(value))
                 messagebox.showinfo("处理完成", str(value))
+            elif kind == "retry_prompt":
+                failed, retry_answer = value
+                retry = messagebox.askyesno(
+                    "仍有未完成任务",
+                    f"以下项目连续失败 5 次：{failed}\n\n"
+                    "是否继续重试未完成任务？\n"
+                    "继续会复用画布中已有的付费任务，不重复提交已生成项目。",
+                )
+                self.summary_var.set(
+                    "正在继续重试未完成任务" if retry else "已停止重试未完成任务"
+                )
+                retry_answer.put(retry)
             elif kind == "idle":
                 self.start_button.configure(state="normal")
                 self.stop_button.configure(state="disabled")
