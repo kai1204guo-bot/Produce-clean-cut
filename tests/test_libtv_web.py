@@ -30,11 +30,16 @@ def test_canvas_url_requires_project_id() -> None:
 
 
 def test_create_project_url_uses_requested_workspace() -> None:
-    completed = type(
-        "Completed", (), {"stdout": json.dumps({"uuid": "new-project-uuid"})}
+    empty_list = type("Completed", (), {"stdout": json.dumps({"projectMetaList": []})})()
+    created = type(
+        "Completed",
+        (),
+        {"stdout": json.dumps({"data": {"uuid": "new-project-uuid"}})},
     )()
 
-    with patch("clean_cut.libtv_web.subprocess.run", return_value=completed) as run:
+    with patch(
+        "clean_cut.libtv_web.subprocess.run", side_effect=[empty_list, created]
+    ) as run:
         url = LibTvWebBatchRunner.create_project_url(
             "BITE CLUB", workspace_id=7887875
         )
@@ -43,7 +48,7 @@ def test_create_project_url_uses_requested_workspace() -> None:
         "https://www.liblib.tv/canvas?"
         "spaceId=7887875&projectId=new-project-uuid"
     )
-    assert run.call_args.args[0] == [
+    assert run.call_args_list[1].args[0] == [
         "libtv",
         "project",
         "create",
@@ -53,6 +58,36 @@ def test_create_project_url_uses_requested_workspace() -> None:
         "-w",
         "7887875",
     ]
+
+
+def test_create_project_url_reuses_newest_auto_project() -> None:
+    projects = {
+        "projectMetaList": [
+            {
+                "uuid": "older",
+                "name": "BITE CLUB",
+                "description": "清水版批量制作自动创建",
+                "projectSpaceId": 7887875,
+                "updatedAtMs": 1,
+            },
+            {
+                "uuid": "newer",
+                "name": "BITE CLUB",
+                "description": "清水版批量制作自动创建",
+                "projectSpaceId": 7887875,
+                "updatedAtMs": 2,
+            },
+        ]
+    }
+    completed = type("Completed", (), {"stdout": json.dumps(projects)})()
+
+    with patch("clean_cut.libtv_web.subprocess.run", return_value=completed) as run:
+        url = LibTvWebBatchRunner.create_project_url(
+            "BITE CLUB", workspace_id=7887875
+        )
+
+    assert url.endswith("projectId=newer")
+    assert run.call_count == 1
 
 
 def test_video_node_ids_are_grouped_by_exact_name() -> None:

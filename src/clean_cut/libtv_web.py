@@ -51,6 +51,9 @@ class LibTvWebBatchRunner:
 
     @classmethod
     def create_project_url(cls, name: str, *, workspace_id: int) -> str:
+        existing_id = cls._find_auto_project(name, workspace_id=workspace_id)
+        if existing_id:
+            return cls._format_project_url(existing_id, workspace_id=workspace_id)
         payload = cls._run_libtv_json(
             [
                 "project",
@@ -63,15 +66,72 @@ class LibTvWebBatchRunner:
             ],
             timeout=120,
         )
-        project_id = payload.get("uuid") or payload.get("projectUuid")
-        if not isinstance(project_id, str) or not re.fullmatch(
-            r"[A-Za-z0-9_-]+", project_id
-        ):
+        project_id = cls._project_uuid_from_payload(payload)
+        if not project_id:
+            project_id = cls._find_auto_project(name, workspace_id=workspace_id)
+        if not project_id:
             raise MediaProcessError("LibTV 已创建画布，但没有返回有效的画布 UUID。")
+        return cls._format_project_url(project_id, workspace_id=workspace_id)
+
+    @staticmethod
+    def _format_project_url(project_id: str, *, workspace_id: int) -> str:
         return (
             "https://www.liblib.tv/canvas?"
             f"spaceId={workspace_id}&projectId={project_id}"
         )
+
+    @staticmethod
+    def _project_uuid_from_payload(payload: dict) -> str:
+        candidates = [payload.get("uuid"), payload.get("projectUuid")]
+        for key in ("project", "data"):
+            nested = payload.get(key)
+            if isinstance(nested, dict):
+                candidates.extend((nested.get("uuid"), nested.get("projectUuid")))
+        for candidate in candidates:
+            if isinstance(candidate, str) and re.fullmatch(r"[A-Za-z0-9_-]+", candidate):
+                return candidate
+        return ""
+
+    @classmethod
+    def _find_auto_project(cls, name: str, *, workspace_id: int) -> str:
+        payload = cls._run_libtv_json(
+            [
+                "project",
+                "list",
+                "-w",
+                str(workspace_id),
+                "-p",
+                "1",
+                "-s",
+                "100",
+                "--name",
+                name,
+                "-o",
+                "updated_at_desc",
+            ],
+            timeout=120,
+        )
+        projects = payload.get("projectMetaList", [])
+        if not isinstance(projects, list):
+            return ""
+        matches = [
+            item
+            for item in projects
+            if isinstance(item, dict)
+            and item.get("name") == name
+            and item.get("description") == "清水版批量制作自动创建"
+            and str(item.get("projectSpaceId") or item.get("folderId"))
+            == str(workspace_id)
+        ]
+        matches.sort(
+            key=lambda item: int(item.get("updatedAtMs") or item.get("createdAtMs") or 0),
+            reverse=True,
+        )
+        for item in matches:
+            project_id = cls._project_uuid_from_payload(item)
+            if project_id:
+                return project_id
+        return ""
 
     def run(
         self,
