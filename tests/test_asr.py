@@ -22,3 +22,23 @@ class FasterWhisperCueTests(TestCase):
         self.assertEqual(cues[0].end_ms, 2000)
         self.assertEqual(cues[0].text, "Hold him down!")
         self.assertEqual(cues[0].confidence, 0.9)
+
+    def test_discards_long_repetitive_noise(self) -> None:
+        segment = SimpleNamespace(
+            start=1.0,
+            end=2.0,
+            text="A" + "H" * 200,
+            words=[],
+        )
+
+        self.assertEqual(segments_to_cues([segment]), [])
+
+    def test_discards_short_scream_text(self) -> None:
+        segment = SimpleNamespace(
+            start=1.0,
+            end=2.0,
+            text="AHHHHHHHHHH!",
+            words=[],
+        )
+
+        self.assertEqual(segments_to_cues([segment]), [])

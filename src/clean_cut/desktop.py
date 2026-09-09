@@ -17,6 +17,7 @@ from clean_cut.batch import (
     episode_number,
     episode_stem,
 )
+from clean_cut.errors import CleanCutError
 from clean_cut.libtv_web import LibTvWebBatchRunner
 
 DEFAULT_PROJECT_URL = (
@@ -43,7 +44,7 @@ class CleanCutApp(tk.Tk):
         self.batch_var = tk.IntVar(value=15)
         self.skip_var = tk.BooleanVar(value=True)
         self.srt_enabled_var = tk.BooleanVar(value=True)
-        self.asr_device_var = tk.StringVar(value="cuda")
+        self.asr_device_var = tk.StringVar(value="auto")
         self.summary_var = tk.StringVar(value="请选择包含剧集视频的文件夹")
 
         self._configure_style()
@@ -108,7 +109,7 @@ class CleanCutApp(tk.Tk):
         ttk.Combobox(
             actions,
             textvariable=self.asr_device_var,
-            values=("cuda", "cpu"),
+            values=("auto", "cuda", "cpu"),
             width=7,
             state="readonly",
         ).pack(side="left")
@@ -275,7 +276,8 @@ class CleanCutApp(tk.Tk):
         device: str,
     ) -> None:
         output_dir.mkdir(parents=True, exist_ok=True)
-        compute_type = "float16" if device == "cuda" else "int8"
+        active_device = "cuda" if device == "auto" else device
+        compute_type = "float16" if active_device == "cuda" else "int8"
         pending = []
         for job in manifest.jobs.values():
             destination = output_dir / f"{episode_stem(job.source_path)}.srt"
@@ -284,15 +286,34 @@ class CleanCutApp(tk.Tk):
                 pending.append((job, destination))
         if not pending:
             return
-        transcriber = FasterWhisperTranscriber(
-            model="turbo", device=device, compute_type=compute_type
-        )
+        try:
+            transcriber = FasterWhisperTranscriber(
+                model="turbo", device=active_device, compute_type=compute_type
+            )
+        except CleanCutError:
+            if device != "auto" or active_device != "cuda":
+                raise
+            active_device = "cpu"
+            transcriber = FasterWhisperTranscriber(
+                model="turbo", device="cpu", compute_type="int8"
+            )
         for index, (job, destination) in enumerate(pending, 1):
             if self._stop_event.is_set():
                 raise RuntimeError("用户已停止任务。")
             job.message = f"生成 SRT（{index}/{len(pending)}）"
             callback(job)
-            transcriber.write_srt(job.source_path, destination, language="en")
+            try:
+                transcriber.write_srt(job.source_path, destination, language="en")
+            except CleanCutError:
+                if device != "auto" or active_device != "cuda":
+                    raise
+                active_device = "cpu"
+                job.message = "GPU 运行库不可用，已自动切换 CPU 生成 SRT"
+                callback(job)
+                transcriber = FasterWhisperTranscriber(
+                    model="turbo", device="cpu", compute_type="int8"
+                )
+                transcriber.write_srt(job.source_path, destination, language="en")
             job.message = "SRT 完成，等待清水版"
             if job.state == JobState.ERROR:
                 job.state = JobState.PENDING

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import re
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
@@ -76,10 +77,13 @@ class FasterWhisperTranscriber:
                 str(source.resolve()),
                 language=language,
                 beam_size=5,
+                repetition_penalty=1.1,
+                no_repeat_ngram_size=3,
                 vad_filter=False,
                 word_timestamps=True,
                 condition_on_previous_text=False,
                 temperature=0.0,
+                hallucination_silence_threshold=1.0,
             )
             return segments_to_cues(segments)
         except RuntimeError as exc:
@@ -98,7 +102,7 @@ def segments_to_cues(segments: Iterable[Any]) -> list[SubtitleCue]:
     cues: list[SubtitleCue] = []
     for segment in segments:
         text = str(segment.text).strip()
-        if not text:
+        if not text or _is_repetitive_noise(text):
             continue
         words = list(segment.words or [])
         start = (
@@ -126,3 +130,11 @@ def segments_to_cues(segments: Iterable[Any]) -> list[SubtitleCue]:
             )
         )
     return cues
+
+
+def _is_repetitive_noise(text: str) -> bool:
+    characters = [character.casefold() for character in text if character.isalnum()]
+    if len(characters) >= 10 and len(set(characters)) <= 2:
+        return True
+    words = re.findall(r"[\w']+", text.casefold())
+    return len(words) >= 6 and len(set(words)) <= 2
