@@ -127,6 +127,12 @@ class LibTvWebBatchRunner:
             self._reload_canvas(page)
 
             missing = [job for job in related if not self._source_node_exists(page, job)]
+            if missing:
+                page.wait_for_timeout(15_000)
+                self._reload_canvas(page)
+                missing = [
+                    job for job in related if not self._source_node_exists(page, job)
+                ]
             for job in missing:
                 self._check_stop()
                 self._set(
@@ -192,12 +198,12 @@ class LibTvWebBatchRunner:
             source_node = page.get_by_text(job.source_path.stem, exact=True)
             self._select_canvas_node(
                 source_node,
-                f"{job.source_path.name} 的画布视频节点不存在或不唯一；"
+                f"{job.source_path.name} 的画布视频节点不存在；"
                 "已在付费提交前安全停止。",
             )
             smart_erase = page.get_by_role("button", name="智能去字幕", exact=True)
-            smart_erase.wait_for(state="visible", timeout=30_000)
-            smart_erase.click()
+            smart_erase.wait_for(state="attached", timeout=30_000)
+            smart_erase.dispatch_event("click")
             page.get_by_text("智能擦除", exact=True).wait_for(state="visible", timeout=30_000)
             generate = page.get_by_text("智能擦除", exact=True).locator(
                 "xpath=following::button[1]"
@@ -205,7 +211,7 @@ class LibTvWebBatchRunner:
             if generate.count() != 1:
                 raise MediaProcessError(f"无法唯一识别 {job.source_path.name} 的生成按钮。")
             self._set(manifest, job, JobState.SUBMITTING, "正在提交，禁止自动重试")
-            generate.click()
+            generate.dispatch_event("click")
             self._set(manifest, job, JobState.SUBMITTED, "已提交云端任务")
 
     def _wait_and_download(
@@ -274,9 +280,9 @@ class LibTvWebBatchRunner:
 
     @staticmethod
     def _select_canvas_node(label, error_message: str) -> None:
-        if label.count() != 1:
+        if label.count() < 1:
             raise MediaProcessError(error_message)
-        node = label.locator(
+        node = label.first.locator(
             "xpath=ancestor::*[contains(@class,'react-flow__node')][1]"
         )
         if node.count() != 1:
