@@ -70,6 +70,7 @@ class LibTvClient:
             encoding="utf-8",
             errors="replace",
             text=True,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
         if result.returncode != 0:
             detail = result.stderr.strip() or result.stdout.strip() or "未返回错误详情"
@@ -241,6 +242,7 @@ def detect_opening_cover_frames(
         encoding="utf-8",
         errors="replace",
         text=True,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     if result.returncode != 0:
         detail = result.stderr.strip() or "未返回错误详情"

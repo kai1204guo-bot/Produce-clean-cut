@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import queue
 import re
 import shutil
 import subprocess
 import tempfile
+import threading
 import time
 import urllib.request
 from collections.abc import Callable
@@ -64,12 +66,16 @@ class LibTvWebBatchRunner:
         clean_dir.mkdir(parents=True, exist_ok=True)
         with sync_playwright() as playwright:
             context = playwright.chromium.launch_persistent_context(
-                str(self.profile_dir), channel="chrome", headless=False, viewport=None
+                str(self.profile_dir),
+                channel="chrome",
+                headless=True,
+                viewport={"width": 1920, "height": 1080},
             )
             page: Page = context.pages[0] if context.pages else context.new_page()
             try:
                 page.goto(self.project_url, wait_until="domcontentloaded", timeout=120_000)
                 self._require_login(page)
+                self._ensure_cli_access(page)
                 pending = self._prepare_jobs(manifest, clean_dir, skip_existing)
                 self._upload_all(page, manifest, pending)
                 self._submit_all(page, manifest, pending)
@@ -117,6 +123,73 @@ class LibTvWebBatchRunner:
         points.or_(login).first.wait_for(state="visible", timeout=120_000)
         if login.count() and login.first.is_visible():
             raise MediaProcessError("LibTV 尚未登录，请先点击“登录 LibTV”。")
+
+    def _ensure_cli_access(self, page) -> None:
+        try:
+            self._video_node_ids_by_name()
+            return
+        except MediaProcessError as exc:
+            if not re.search(r"用户未授权|\b10001\b", str(exc)):
+                raise
+
+        self._refresh_cli_login_from_browser(page)
+        page.goto(self.project_url, wait_until="domcontentloaded", timeout=120_000)
+        self._require_login(page)
+        try:
+            self._video_node_ids_by_name()
+        except MediaProcessError as exc:
+            raise MediaProcessError(
+                "新画布的 CLI 授权刷新后仍不可用。请确认“登录 LibTV”窗口与该画布"
+                "使用的是同一个账号，然后重新运行。"
+            ) from exc
+
+    def _refresh_cli_login_from_browser(self, page) -> None:
+        process = subprocess.Popen(
+            ["libtv", "login", "web"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        stderr_lines: list[str] = []
+        line_queue: queue.Queue[str] = queue.Queue()
+
+        def read_stderr() -> None:
+            assert process.stderr is not None
+            for line in iter(process.stderr.readline, ""):
+                stderr_lines.append(line)
+                line_queue.put(line)
+
+        threading.Thread(target=read_stderr, daemon=True).start()
+        login_url = ""
+        deadline = time.monotonic() + 30
+        try:
+            while time.monotonic() < deadline and process.poll() is None:
+                try:
+                    line = line_queue.get(timeout=0.5)
+                except queue.Empty:
+                    continue
+                match = re.search(r"https://[^\s'\"]+", line)
+                if match:
+                    login_url = match.group(0).rstrip(".,;，。")
+                    break
+            if not login_url:
+                raise MediaProcessError("LibTV CLI 未返回网页登录地址，无法自动刷新授权。")
+            page.goto(login_url, wait_until="domcontentloaded", timeout=120_000)
+            try:
+                process.wait(timeout=120)
+            except subprocess.TimeoutExpired as exc:
+                raise MediaProcessError(
+                    "LibTV 网页会话无法自动完成 CLI 授权，请点击“登录 LibTV”重新登录。"
+                ) from exc
+            if process.returncode != 0:
+                detail = "".join(stderr_lines).strip() or "未返回错误详情"
+                raise MediaProcessError(f"刷新 LibTV CLI 授权失败：{detail[:500]}")
+        finally:
+            if process.poll() is None:
+                process.terminate()
 
     def _upload_all(self, page, manifest: BatchManifest, jobs: list[BatchJob]) -> None:
         node_ids = self._video_node_ids_by_name()

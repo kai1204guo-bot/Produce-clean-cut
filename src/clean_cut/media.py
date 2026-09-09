@@ -138,6 +138,7 @@ def probe_media(source: Path) -> MediaInfo:
         encoding="utf-8",
         errors="replace",
         text=True,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
     )
     if result.returncode != 0:
         raise MediaProbeError(f"无法读取媒体信息：{result.stderr.strip()}")
