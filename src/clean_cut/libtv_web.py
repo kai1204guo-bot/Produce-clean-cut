@@ -28,6 +28,7 @@ class LibTvWebBatchRunner:
         profile_dir: Path,
         batch_size: int = 15,
         max_cloud_concurrency: int = 7,
+        max_job_retries: int = 5,
         status_callback: StatusCallback | None = None,
         stop_requested: Callable[[], bool] | None = None,
     ) -> None:
@@ -41,6 +42,7 @@ class LibTvWebBatchRunner:
         self.profile_dir = profile_dir.resolve()
         self.batch_size = batch_size
         self.max_cloud_concurrency = max_cloud_concurrency
+        self.max_job_retries = max(1, max_job_retries)
         self.status_callback = status_callback or (lambda _job: None)
         self.stop_requested = stop_requested or (lambda: False)
         self.last_failed_jobs: list[str] = []
@@ -52,6 +54,7 @@ class LibTvWebBatchRunner:
         clean_dir: Path,
         skip_existing: bool = True,
     ) -> None:
+        self.last_failed_jobs = []
         try:
             from playwright.sync_api import Page, sync_playwright
         except ImportError as exc:
@@ -268,9 +271,37 @@ class LibTvWebBatchRunner:
     ) -> None:
         remaining = list(jobs)
         failures: list[tuple[BatchJob, str]] = []
+        retry_counts: dict[str, int] = {}
+        node_query_failures = 0
         while remaining:
             self._check_stop()
-            node_ids = self._video_node_ids_by_name()
+            try:
+                node_ids = self._video_node_ids_by_name()
+                node_query_failures = 0
+            except Exception as exc:
+                node_query_failures += 1
+                detail = str(exc) or type(exc).__name__
+                if node_query_failures < self.max_job_retries:
+                    for job in remaining:
+                        self._set(
+                            manifest,
+                            job,
+                            JobState.GENERATING,
+                            f"查询 LibTV 临时失败，自动重试 "
+                            f"{node_query_failures}/{self.max_job_retries}：{detail}",
+                        )
+                    time.sleep(min(30, 5 * node_query_failures))
+                    continue
+                for job in list(remaining):
+                    self._set(
+                        manifest,
+                        job,
+                        JobState.ERROR,
+                        f"连续 {self.max_job_retries} 次查询失败：{detail}",
+                    )
+                    failures.append((job, detail))
+                    remaining.remove(job)
+                break
             for job in list(remaining):
                 try:
                     completed = self._poll_and_download_one(
@@ -280,15 +311,26 @@ class LibTvWebBatchRunner:
                     if self.stop_requested():
                         raise
                     detail = str(exc) or type(exc).__name__
+                    attempt = retry_counts.get(job.key, 0) + 1
+                    retry_counts[job.key] = attempt
+                    if attempt < self.max_job_retries:
+                        self._set(
+                            manifest,
+                            job,
+                            JobState.GENERATING,
+                            f"临时失败，自动重试 {attempt}/{self.max_job_retries}：{detail}",
+                        )
+                        continue
                     self._set(
                         manifest,
                         job,
                         JobState.ERROR,
-                        f"本集失败，已继续下一集：{detail}",
+                        f"连续 {self.max_job_retries} 次失败，已继续下一集：{detail}",
                     )
                     failures.append((job, detail))
                     remaining.remove(job)
                     continue
+                retry_counts.pop(job.key, None)
                 if completed:
                     remaining.remove(job)
             if remaining:
@@ -607,10 +649,12 @@ class LibTvWebBatchRunner:
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
             payload = json.loads(completed.stdout)
+        except subprocess.CalledProcessError as exc:
+            detail = (exc.stderr or exc.stdout or str(exc)).strip()
+            raise MediaProcessError(f"LibTV CLI 查询失败：{detail[:500]}") from exc
         except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
-            raise MediaProcessError(
-                "LibTV 官方 CLI 执行失败，请确认 CLI 已登录且网络正常后重试。"
-            ) from exc
+            detail = str(exc).strip() or type(exc).__name__
+            raise MediaProcessError(f"LibTV CLI 查询失败：{detail[:500]}") from exc
         if not isinstance(payload, dict):
             raise MediaProcessError("LibTV 官方 CLI 返回了无法识别的数据。")
         return payload

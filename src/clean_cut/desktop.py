@@ -264,7 +264,8 @@ class CleanCutApp(tk.Tk):
                     self._events.put(
                         (
                             "done",
-                            f"批次其余任务已处理完成；失败项可重新运行重试：{failed}",
+                            f"批次其余任务已处理完成；以下项目自动重试 5 次后仍失败，"
+                            f"可重新运行继续：{failed}",
                         )
                     )
                 else:

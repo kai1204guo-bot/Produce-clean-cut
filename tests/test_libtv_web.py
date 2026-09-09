@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
+from clean_cut.batch import BatchJob, BatchManifest, JobState
 from clean_cut.libtv_web import LibTvWebBatchRunner
 
 PROJECT_ID = "a282f30b20a04d8aac4e32d20f901f73"
@@ -105,3 +106,29 @@ def test_active_cloud_task_count_ignores_completed_and_source_nodes() -> None:
         ),
     ):
         assert runner._active_cloud_task_count() == 1
+
+
+def test_wait_and_download_retries_transient_episode_failure(tmp_path: Path) -> None:
+    source = tmp_path / "EP1.mp4"
+    job = BatchJob(source=str(source), episode=1)
+    manifest = BatchManifest(tmp_path / "state.json", [job])
+    runner = LibTvWebBatchRunner(
+        project_url=PROJECT_URL,
+        profile_dir=tmp_path / "profile",
+        max_job_retries=3,
+    )
+
+    with (
+        patch.object(runner, "_video_node_ids_by_name", return_value={}),
+        patch.object(
+            runner,
+            "_poll_and_download_one",
+            side_effect=[OSError("temporary SSL error"), True],
+        ) as poll,
+        patch("clean_cut.libtv_web.time.sleep"),
+    ):
+        runner._wait_and_download(object(), object(), manifest, [job], tmp_path)
+
+    assert poll.call_count == 2
+    assert runner.last_failed_jobs == []
+    assert job.state is JobState.GENERATING
