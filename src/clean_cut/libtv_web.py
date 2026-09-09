@@ -737,7 +737,7 @@ class LibTvWebBatchRunner:
     def _wait_for_cloud_slot(self, page, manifest: BatchManifest, job: BatchJob) -> None:
         while True:
             self._check_stop()
-            active = self._active_cloud_task_count()
+            active = self._active_cloud_task_count(manifest)
             if active < self.max_cloud_concurrency:
                 return
             self._set(
@@ -748,23 +748,57 @@ class LibTvWebBatchRunner:
             )
             self._wait_before_submit_retry(page, seconds=10)
 
-    def _active_cloud_task_count(self) -> int:
+    def _active_cloud_task_count(self, manifest: BatchManifest | None = None) -> int:
         node_ids = self._video_node_ids_by_name()
         active = 0
+        jobs_by_stem = (
+            {job.source_path.stem: job for job in manifest.jobs.values()}
+            if manifest is not None
+            else {}
+        )
         for name, ids in node_ids.items():
             if not name.startswith("视频一键去字幕-"):
                 continue
+            job = jobs_by_stem.get(name.removeprefix("视频一键去字幕-"))
             for node_id in ids:
                 details = self._canvas_node_details(node_id)
                 data = details.get("data", {})
                 task_info = data.get("taskInfo", {})
+                media_url = self._media_url_from_details(details)
+                progress = int(task_info.get("progressPercent") or 0)
                 if (
                     task_info.get("taskId")
-                    and not self._media_url_from_details(details)
+                    and not media_url
                     and (task_info.get("loading") or task_info.get("status") in {0, 1})
                 ):
                     active += 1
+                    self._sync_cloud_progress(
+                        manifest, job, progress, f"云端生成中 {progress}%"
+                    )
+                elif media_url:
+                    self._sync_cloud_progress(
+                        manifest, job, 100, "云端生成完成，等待下载"
+                    )
         return active
+
+    def _sync_cloud_progress(
+        self,
+        manifest: BatchManifest | None,
+        job: BatchJob | None,
+        progress: int,
+        message: str,
+    ) -> None:
+        if manifest is None or job is None:
+            return
+        if job.state in {JobState.COMPLETE, JobState.SKIPPED, JobState.ERROR}:
+            return
+        if (
+            job.state == JobState.GENERATING
+            and job.progress == progress
+            and job.message == message
+        ):
+            return
+        self._set(manifest, job, JobState.GENERATING, message, progress)
 
     @staticmethod
     def _dismiss_concurrency_modal(page) -> bool:

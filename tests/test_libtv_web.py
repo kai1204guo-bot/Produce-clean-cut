@@ -170,6 +170,60 @@ def test_active_cloud_task_count_ignores_completed_and_source_nodes() -> None:
         assert runner._active_cloud_task_count() == 1
 
 
+def test_active_cloud_task_count_syncs_visible_progress(tmp_path: Path) -> None:
+    runner = make_runner()
+    running_job = BatchJob(source=str(tmp_path / "EP1.mp4"), episode=1)
+    completed_job = BatchJob(source=str(tmp_path / "EP2.mp4"), episode=2)
+    manifest = BatchManifest(tmp_path / "state.json", [running_job, completed_job])
+    details = {
+        "running": {
+            "data": {
+                "url": [],
+                "taskInfo": {
+                    "taskId": "task-running",
+                    "loading": True,
+                    "status": 1,
+                    "progressPercent": 36,
+                },
+            }
+        },
+        "completed": {
+            "data": {
+                "url": ["https://example.test/clean.mp4"],
+                "taskInfo": {
+                    "taskId": "task-done",
+                    "loading": False,
+                    "status": 2,
+                    "progressPercent": 100,
+                },
+            }
+        },
+    }
+
+    with (
+        patch.object(
+            runner,
+            "_video_node_ids_by_name",
+            return_value={
+                "视频一键去字幕-EP1": ["running"],
+                "视频一键去字幕-EP2": ["completed"],
+            },
+        ),
+        patch.object(
+            runner,
+            "_canvas_node_details",
+            side_effect=lambda node_id: details[node_id],
+        ),
+    ):
+        assert runner._active_cloud_task_count(manifest) == 1
+
+    assert running_job.state is JobState.GENERATING
+    assert running_job.progress == 36
+    assert completed_job.state is JobState.GENERATING
+    assert completed_job.progress == 100
+    assert completed_job.message == "云端生成完成，等待下载"
+
+
 def test_wait_and_download_retries_transient_episode_failure(tmp_path: Path) -> None:
     source = tmp_path / "EP1.mp4"
     job = BatchJob(source=str(source), episode=1)
