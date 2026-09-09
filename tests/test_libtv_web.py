@@ -14,6 +14,12 @@ PROJECT_ID = "a282f30b20a04d8aac4e32d20f901f73"
 PROJECT_URL = f"https://www.liblib.tv/canvas?spaceId=1&projectId={PROJECT_ID}"
 
 
+@pytest.fixture(autouse=True)
+def use_plain_libtv_command():
+    with patch("clean_cut.libtv_web.locate_executable", return_value=None):
+        yield
+
+
 def make_runner() -> LibTvWebBatchRunner:
     return LibTvWebBatchRunner(project_url=PROJECT_URL, profile_dir=Path("profile"))
 

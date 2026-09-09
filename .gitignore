@@ -5,6 +5,7 @@ __pycache__/
 .venv/
 dist/
 dist-*/
+installer-dist/
 build/
 *.egg-info/
 .clean-cut-work/

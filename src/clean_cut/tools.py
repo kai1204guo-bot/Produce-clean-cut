@@ -10,8 +10,24 @@ from uuid import uuid4
 from clean_cut.errors import MediaProcessError, ToolNotFoundError
 
 
+def locate_executable(name: str) -> str | None:
+    located = shutil.which(name)
+    if located:
+        return located
+    candidates: list[Path] = []
+    local = Path(os.environ.get("LOCALAPPDATA", ""))
+    if local:
+        candidates.append(local / "Microsoft" / "WinGet" / "Links" / f"{name}.exe")
+    if name.casefold() == "libtv":
+        candidates.append(Path.home() / ".libtv" / "libtv.exe")
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
 def require_tool(name: str) -> str:
-    executable = shutil.which(name)
+    executable = locate_executable(name)
     if executable is None:
         raise ToolNotFoundError(
             f"未找到 {name}。请安装 FFmpeg，并确认 {name} 已加入 PATH。"

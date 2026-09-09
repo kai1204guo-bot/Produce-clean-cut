@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import queue
-import re
 import sys
 import tempfile
 import threading
@@ -20,8 +19,10 @@ from clean_cut.batch import (
     episode_number,
     episode_stem,
 )
+from clean_cut.dependencies import detect_dependencies, install_dependency
 from clean_cut.errors import CleanCutError
 from clean_cut.libtv_web import LibTvWebBatchRunner
+from clean_cut.series_queue import SeriesQueueStore, SeriesTask, task_from_source
 from clean_cut.tools import write_text_atomically
 
 PROJECT_URL_FILE = ".clean-cut-project-url.txt"
@@ -37,12 +38,16 @@ class CleanCutApp(tk.Tk):
         super().__init__()
         self.title("清水版批量制作")
         self.geometry("1120x720")
-        self.minsize(920, 620)
+        self.minsize(920, 700)
         self.configure(bg="#F0FDFA")
         self._events: queue.Queue[tuple[str, object]] = queue.Queue()
         self._stop_event = threading.Event()
         self._worker: threading.Thread | None = None
         self._rows: dict[str, str] = {}
+        self._queue_rows: dict[str, str] = {}
+        self._active_series_id = ""
+        self._queue_store = SeriesQueueStore(self._app_data_dir() / "series-queue.json")
+        self._series_tasks = self._queue_store.load()
 
         self.source_var = tk.StringVar()
         self.clean_var = tk.StringVar()
@@ -56,7 +61,14 @@ class CleanCutApp(tk.Tk):
 
         self._configure_style()
         self._build_ui()
+        self._render_queue()
         self.after(150, self._drain_events)
+        self.after(700, self._check_dependencies_on_startup)
+
+    @staticmethod
+    def _app_data_dir() -> Path:
+        base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+        return base / "ProduceCleanCut"
 
     def _configure_style(self) -> None:
         style = ttk.Style(self)
@@ -87,9 +99,48 @@ class CleanCutApp(tk.Tk):
         ttk.Label(root, text="清水版批量制作", style="Title.TLabel").pack(anchor="w")
         ttk.Label(
             root,
-            text="每批上传 15 集，全部上传后逐集提交；支持断点记录并防止重复扣积分。",
+            text="支持多部剧排队无人值守；逐集生成、立即下载并恢复封面。",
             style="Muted.TLabel",
-        ).pack(anchor="w", pady=(4, 18))
+        ).pack(anchor="w", pady=(4, 10))
+
+        queue_card = ttk.Frame(root, style="Card.TFrame", padding=10)
+        queue_card.pack(fill="x", pady=(0, 10))
+        queue_actions = ttk.Frame(queue_card, style="Card.TFrame")
+        queue_actions.pack(fill="x", pady=(0, 6))
+        ttk.Label(
+            queue_actions, text="多剧任务队列", background="#FFFFFF", font=("Segoe UI Semibold", 11)
+        ).pack(side="left")
+        ttk.Button(
+            queue_actions, text="添加剧集文件夹", command=self._add_series
+        ).pack(side="left", padx=(14, 4))
+        ttk.Button(queue_actions, text="移除选中", command=self._remove_series).pack(
+            side="left", padx=4
+        )
+        ttk.Button(
+            queue_actions, text="上移", command=lambda: self._move_series(-1)
+        ).pack(side="left", padx=4)
+        ttk.Button(
+            queue_actions, text="下移", command=lambda: self._move_series(1)
+        ).pack(side="left", padx=4)
+        ttk.Button(
+            queue_actions, text="环境检测 / 一键安装", command=self._open_dependency_center
+        ).pack(side="right")
+        self.queue_tree = ttk.Treeview(
+            queue_card,
+            columns=("series", "source", "state", "message"),
+            show="headings",
+            height=4,
+        )
+        for column, title, width in (
+            ("series", "剧名", 180),
+            ("source", "成片文件夹", 430),
+            ("state", "状态", 100),
+            ("message", "说明", 300),
+        ):
+            self.queue_tree.heading(column, text=title)
+            self.queue_tree.column(column, width=width, anchor="w")
+        self.queue_tree.pack(fill="x")
+        self.queue_tree.bind("<<TreeviewSelect>>", self._select_series)
 
         form = ttk.Frame(root, style="Card.TFrame", padding=18)
         form.pack(fill="x")
@@ -151,6 +202,106 @@ class CleanCutApp(tk.Tk):
             self.tree.heading(column, text=headings[column])
             self.tree.column(column, width=widths[column], anchor="w")
         self.tree.pack(fill="both", expand=True)
+
+    def _render_queue(self) -> None:
+        for item in self.queue_tree.get_children():
+            self.queue_tree.delete(item)
+        self._queue_rows.clear()
+        for task in self._series_tasks:
+            row = self.queue_tree.insert(
+                "",
+                "end",
+                values=(task.name, task.source, task.state, task.message),
+            )
+            self._queue_rows[task.task_id] = row
+
+    def _save_queue(self) -> None:
+        self._queue_store.save(self._series_tasks)
+
+    def _add_series(self) -> None:
+        if self._worker and self._worker.is_alive():
+            messagebox.showinfo("任务运行中", "请先停止当前队列，再添加新剧。")
+            return
+        folder = filedialog.askdirectory(title="选择一部剧的成片文件夹")
+        if not folder:
+            return
+        source = Path(folder)
+        videos = discover_videos(source) if source.is_dir() else []
+        if not videos:
+            messagebox.showerror("无法添加", "该文件夹中没有支持的视频文件。")
+            return
+        key = str(source.resolve()).casefold()
+        existing = next(
+            (
+                task
+                for task in self._series_tasks
+                if str(Path(task.source).resolve()).casefold() == key
+            ),
+            None,
+        )
+        if existing:
+            existing.state = "pending"
+            existing.message = "已重新加入队列"
+            task = existing
+        else:
+            task = task_from_source(source)
+            self._series_tasks.append(task)
+        self._save_queue()
+        self._render_queue()
+        row = self._queue_rows[task.task_id]
+        self.queue_tree.selection_set(row)
+        self.queue_tree.see(row)
+        self._load_series_into_form(task)
+
+    def _selected_task(self) -> SeriesTask | None:
+        selected = self.queue_tree.selection()
+        if len(selected) != 1:
+            return None
+        row = selected[0]
+        return next(
+            (task for task in self._series_tasks if self._queue_rows.get(task.task_id) == row),
+            None,
+        )
+
+    def _select_series(self, _event=None) -> None:
+        task = self._selected_task()
+        if task and not (self._worker and self._worker.is_alive()):
+            self._load_series_into_form(task)
+
+    def _load_series_into_form(self, task: SeriesTask) -> None:
+        self.source_var.set(task.source)
+        self.clean_var.set(task.clean)
+        self.srt_var.set(task.srt)
+        self.project_var.set(task.project_url)
+        videos = discover_videos(Path(task.source)) if Path(task.source).is_dir() else []
+        self._active_series_id = task.task_id
+        self._load_rows(videos)
+
+    def _remove_series(self) -> None:
+        if self._worker and self._worker.is_alive():
+            messagebox.showinfo("任务运行中", "请先停止当前队列。")
+            return
+        task = self._selected_task()
+        if not task:
+            return
+        self._series_tasks = [item for item in self._series_tasks if item.task_id != task.task_id]
+        self._save_queue()
+        self._render_queue()
+
+    def _move_series(self, offset: int) -> None:
+        if self._worker and self._worker.is_alive():
+            return
+        task = self._selected_task()
+        if not task:
+            return
+        index = self._series_tasks.index(task)
+        target = max(0, min(len(self._series_tasks) - 1, index + offset))
+        if target == index:
+            return
+        self._series_tasks.insert(target, self._series_tasks.pop(index))
+        self._save_queue()
+        self._render_queue()
+        self.queue_tree.selection_set(self._queue_rows[task.task_id])
 
     def _path_row(self, parent, row: int, label: str, variable: tk.StringVar, command) -> None:
         ttk.Label(parent, text=label, background="#FFFFFF").grid(
@@ -231,116 +382,157 @@ class CleanCutApp(tk.Tk):
     def _start(self) -> None:
         if self._worker and self._worker.is_alive():
             return
-        source = Path(self.source_var.get())
-        clean = Path(self.clean_var.get())
-        if not source.is_dir():
-            messagebox.showerror("无法开始", "请选择有效的成片文件夹。")
+        required_missing = [
+            item for item in detect_dependencies() if item.required and not item.installed
+        ]
+        if required_missing:
+            messagebox.showerror(
+                "运行环境不完整",
+                "缺少：" + "、".join(item.name for item in required_missing)
+                + "\n\n请点击“环境检测 / 一键安装”完成安装。",
+            )
+            self._open_dependency_center()
             return
-        videos = discover_videos(source)
-        if not videos:
-            messagebox.showerror("无法开始", "成片文件夹中没有支持的视频。")
-            return
-        clean.mkdir(parents=True, exist_ok=True)
-        self._load_rows(videos)
-        manifest = BatchManifest.load_or_create(clean / ".clean-cut-state.json", videos)
-        if not self.project_var.get().strip():
-            series_name = re.sub(
-                r"^\s*成片[\s_-]*", "", source.parent.name, flags=re.IGNORECASE
-            ).strip()
-            if series_name.casefold() in {"成片", "videos", "video"}:
-                series_name = source.name.strip()
-            try:
-                project_url = LibTvWebBatchRunner.create_project_url(
-                    series_name, workspace_id=DEFAULT_WORKSPACE_ID
-                )
-            except Exception as exc:
-                messagebox.showerror(
-                    "创建 LibTV 画布失败",
-                    f"无法为《{series_name}》自动创建画布：{exc}\n\n"
-                    "请先点击“登录 LibTV”刷新官方 CLI 授权。",
-                )
+
+        tasks = [task for task in self._series_tasks if task.state != "completed"]
+        ephemeral = False
+        if not tasks:
+            source = Path(self.source_var.get())
+            if not source.is_dir() or not discover_videos(source):
+                messagebox.showerror("无法开始", "请添加剧集到队列，或选择有效的成片文件夹。")
                 return
-            self.project_var.set(project_url)
-            self.summary_var.set(f"已自动创建《{series_name}》专用画布")
+            task = task_from_source(source)
+            task.clean = self.clean_var.get().strip() or task.clean
+            task.srt = self.srt_var.get().strip() or task.srt
+            task.project_url = self.project_var.get().strip()
+            tasks = [task]
+            ephemeral = True
+
+        batch_size = self.batch_var.get()
+        skip_existing = self.skip_var.get()
+        srt_enabled = self.srt_enabled_var.get()
+        asr_device = self.asr_device_var.get()
         self._stop_event.clear()
         self.start_button.configure(state="disabled")
         self.stop_button.configure(state="normal")
 
-        def callback(job: BatchJob) -> None:
-            self._events.put(("job", job))
-
-        try:
-            runner = self._make_runner(callback)
-        except ValueError as exc:
-            self.start_button.configure(state="normal")
-            self.stop_button.configure(state="disabled")
-            messagebox.showerror("无法开始", str(exc))
-            return
-        write_text_atomically(
-            clean / PROJECT_URL_FILE, self.project_var.get().strip() + "\n"
-        )
-        srt_enabled = self.srt_enabled_var.get()
-        srt_output = Path(self.srt_var.get())
-        asr_device = self.asr_device_var.get()
-
         def work() -> None:
-            srt_errors: list[Exception] = []
-
-            def generate_srt() -> None:
+            completed_count = 0
+            failed_count = 0
+            partial_count = 0
+            for task in tasks:
+                if self._stop_event.is_set():
+                    break
                 try:
-                    self._generate_srt(
-                        manifest, srt_output, callback, device=asr_device
+                    task.state = "running"
+                    task.message = "正在准备"
+                    self._queue_changed(task, ephemeral)
+                    source = Path(task.source)
+                    videos = discover_videos(source)
+                    if not videos:
+                        raise CleanCutError("成片文件夹不存在或没有支持的视频。")
+                    clean = Path(task.clean)
+                    clean.mkdir(parents=True, exist_ok=True)
+                    manifest = BatchManifest.load_or_create(
+                        clean / ".clean-cut-state.json", videos
                     )
-                except Exception as exc:
-                    srt_errors.append(exc)
-
-            srt_worker = None
-            try:
-                if srt_enabled:
-                    srt_worker = threading.Thread(target=generate_srt, daemon=True)
-                    srt_worker.start()
-                while True:
-                    runner.run(
-                        manifest, clean_dir=clean, skip_existing=self.skip_var.get()
-                    )
-                    if not runner.last_failed_jobs or self._stop_event.is_set():
-                        break
-                    failed = "、".join(runner.last_failed_jobs)
-                    retry_answer: queue.Queue[bool] = queue.Queue(maxsize=1)
-                    self._events.put(("retry_prompt", (failed, retry_answer)))
-                    while not self._stop_event.is_set():
-                        try:
-                            retry = retry_answer.get(timeout=0.2)
-                            break
-                        except queue.Empty:
-                            continue
-                    else:
-                        retry = False
-                    if not retry:
-                        break
-                if srt_worker:
-                    srt_worker.join()
-                if srt_errors:
-                    raise srt_errors[0]
-                if runner.last_failed_jobs:
-                    failed = "、".join(runner.last_failed_jobs)
-                    self._events.put(
-                        (
-                            "done",
-                            f"批次其余任务已处理完成；以下项目仍未完成，"
-                            f"可重新运行继续：{failed}",
+                    self._activate_series(task, videos)
+                    if not task.project_url:
+                        task.message = "正在创建或恢复专用 LibTV 画布"
+                        self._queue_changed(task, ephemeral)
+                        task.project_url = LibTvWebBatchRunner.create_project_url(
+                            task.name, workspace_id=DEFAULT_WORKSPACE_ID
                         )
+                    write_text_atomically(
+                        clean / PROJECT_URL_FILE, task.project_url.strip() + "\n"
                     )
-                else:
-                    self._events.put(("done", "全部任务处理完成。"))
-            except Exception as exc:
-                self._stop_event.set()
-                self._events.put(("error", str(exc)))
-            finally:
-                self._events.put(("idle", None))
+                    self._queue_changed(task, ephemeral)
+
+                    def callback(job: BatchJob, task_id: str = task.task_id) -> None:
+                        self._events.put(("job", (task_id, job)))
+
+                    runner = LibTvWebBatchRunner(
+                        project_url=task.project_url,
+                        profile_dir=self._profile_dir(),
+                        batch_size=batch_size,
+                        status_callback=callback,
+                        stop_requested=self._stop_event.is_set,
+                    )
+                    srt_errors: list[Exception] = []
+
+                    def generate_srt(
+                        active_manifest=manifest,
+                        active_task=task,
+                        active_callback=callback,
+                        errors=srt_errors,
+                    ) -> None:
+                        try:
+                            self._generate_srt(
+                                active_manifest,
+                                Path(active_task.srt),
+                                active_callback,
+                                device=asr_device,
+                            )
+                        except Exception as exc:
+                            errors.append(exc)
+
+                    srt_worker = None
+                    if srt_enabled:
+                        srt_worker = threading.Thread(target=generate_srt, daemon=True)
+                        srt_worker.start()
+                    runner.run(
+                        manifest, clean_dir=clean, skip_existing=skip_existing
+                    )
+                    if srt_worker:
+                        srt_worker.join()
+                    if srt_errors:
+                        raise srt_errors[0]
+                    if runner.last_failed_jobs:
+                        task.state = "partial"
+                        task.message = "未完成：" + "、".join(runner.last_failed_jobs)
+                        partial_count += 1
+                    else:
+                        task.state = "completed"
+                        task.message = "全部处理完成"
+                        completed_count += 1
+                except Exception as exc:
+                    if self._stop_event.is_set():
+                        task.state = "pending"
+                        task.message = "已安全停止，可继续"
+                    else:
+                        task.state = "failed"
+                        task.message = str(exc)
+                        failed_count += 1
+                finally:
+                    self._queue_changed(task, ephemeral)
+
+            if self._stop_event.is_set():
+                summary = "队列已安全停止；再次开始会从记录继续。"
+            else:
+                summary = (
+                    f"多剧队列处理结束：完成 {completed_count} 部，"
+                    f"部分完成 {partial_count} 部，失败 {failed_count} 部。"
+                )
+            self._events.put(("done", summary))
+            self._events.put(("idle", None))
 
         self._worker = threading.Thread(target=work, daemon=True)
         self._worker.start()
+
+    def _activate_series(self, task: SeriesTask, videos: list[Path]) -> None:
+        ready: queue.Queue[bool] = queue.Queue(maxsize=1)
+        self._events.put(("activate_series", (task, videos, ready)))
+        while not self._stop_event.is_set():
+            try:
+                ready.get(timeout=0.2)
+                return
+            except queue.Empty:
+                continue
+
+    def _queue_changed(self, task: SeriesTask, ephemeral: bool) -> None:
+        if not ephemeral:
+            self._save_queue()
+        self._events.put(("series", task))
 
     def _generate_srt(
         self,
@@ -414,6 +606,133 @@ class CleanCutApp(tk.Tk):
             encoding="utf-8",
         )
 
+    def _check_dependencies_on_startup(self) -> None:
+        missing = [
+            item for item in detect_dependencies() if item.required and not item.installed
+        ]
+        if not missing:
+            return
+        if messagebox.askyesno(
+            "需要安装运行组件",
+            "检测到缺少："
+            + "、".join(item.name for item in missing)
+            + "\n\n是否打开一键安装中心？",
+        ):
+            self._open_dependency_center()
+
+    def _open_dependency_center(self) -> None:
+        window = tk.Toplevel(self)
+        window.title("运行环境检测与一键安装")
+        window.geometry("820x430")
+        window.transient(self)
+        frame = ttk.Frame(window, padding=18)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(
+            frame,
+            text="必需组件缺失时可直接安装；CUDA 是可选加速项，CPU 模式不受影响。",
+            style="Muted.TLabel",
+        ).pack(anchor="w", pady=(0, 10))
+        tree = ttk.Treeview(
+            frame,
+            columns=("name", "required", "state", "detail"),
+            show="headings",
+            height=10,
+        )
+        for column, title, width in (
+            ("name", "组件", 190),
+            ("required", "类型", 80),
+            ("state", "状态", 90),
+            ("detail", "说明", 410),
+        ):
+            tree.heading(column, text=title)
+            tree.column(column, width=width, anchor="w")
+        tree.pack(fill="both", expand=True)
+        status_var = tk.StringVar(value="检测完成")
+        ttk.Label(frame, textvariable=status_var, style="Muted.TLabel").pack(
+            anchor="w", pady=(8, 4)
+        )
+        actions = ttk.Frame(frame)
+        actions.pack(fill="x")
+
+        def refresh() -> list:
+            for item in tree.get_children():
+                tree.delete(item)
+            items = detect_dependencies()
+            for item in items:
+                tree.insert(
+                    "",
+                    "end",
+                    iid=item.key,
+                    values=(
+                        item.name,
+                        "必需" if item.required else "可选",
+                        "已安装" if item.installed else "未安装",
+                        item.detail,
+                    ),
+                )
+            return items
+
+        def install(keys: list[str]) -> None:
+            if not keys:
+                messagebox.showinfo("无需安装", "所选组件均已安装。", parent=window)
+                return
+            install_selected.configure(state="disabled")
+            install_required.configure(state="disabled")
+
+            def progress(text: str) -> None:
+                self.after(0, status_var.set, text)
+
+            def worker() -> None:
+                try:
+                    for key in keys:
+                        install_dependency(key, progress)
+                except Exception as exc:
+                    error = str(exc)
+                    self.after(
+                        0,
+                        lambda error=error: messagebox.showerror(
+                            "安装失败", error, parent=window
+                        ),
+                    )
+                finally:
+                    self.after(0, refresh)
+                    self.after(0, install_selected.configure, {"state": "normal"})
+                    self.after(0, install_required.configure, {"state": "normal"})
+                    self.after(0, status_var.set, "安装流程结束，已重新检测")
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        def install_selection() -> None:
+            items = {item.key: item for item in detect_dependencies()}
+            keys = [
+                key
+                for key in tree.selection()
+                if key in items and not items[key].installed and items[key].installable
+            ]
+            install(keys)
+
+        def install_all_required() -> None:
+            keys = [
+                item.key
+                for item in detect_dependencies()
+                if item.required and not item.installed and item.installable
+            ]
+            install(keys)
+
+        install_required = ttk.Button(
+            actions,
+            text="一键安装全部必需项",
+            style="Primary.TButton",
+            command=install_all_required,
+        )
+        install_required.pack(side="left")
+        install_selected = ttk.Button(
+            actions, text="安装选中项", command=install_selection
+        )
+        install_selected.pack(side="left", padx=8)
+        ttk.Button(actions, text="重新检测", command=refresh).pack(side="left")
+        refresh()
+
     def _request_stop(self) -> None:
         self._stop_event.set()
         self.summary_var.set("正在安全停止；已提交的 LibTV 云端任务不会取消")
@@ -426,9 +745,9 @@ class CleanCutApp(tk.Tk):
             except queue.Empty:
                 break
             if kind == "job":
-                job = value
+                task_id, job = value
                 assert isinstance(job, BatchJob)
-                row = self._rows.get(job.key)
+                row = self._rows.get(job.key) if task_id == self._active_series_id else None
                 if row:
                     values = self.tree.item(row, "values")
                     self.tree.item(
@@ -442,6 +761,26 @@ class CleanCutApp(tk.Tk):
                         ),
                     )
                 self.summary_var.set(job.message)
+            elif kind == "activate_series":
+                task, videos, ready = value
+                self._active_series_id = task.task_id
+                self.source_var.set(task.source)
+                self.clean_var.set(task.clean)
+                self.srt_var.set(task.srt)
+                self.project_var.set(task.project_url)
+                self._load_rows(videos)
+                self.summary_var.set(f"正在处理《{task.name}》")
+                ready.put(True)
+            elif kind == "series":
+                task = value
+                row = self._queue_rows.get(task.task_id)
+                if row:
+                    self.queue_tree.item(
+                        row,
+                        values=(task.name, task.source, task.state, task.message),
+                    )
+                if task.task_id == self._active_series_id:
+                    self.project_var.set(task.project_url)
             elif kind == "error":
                 self.summary_var.set(str(value))
                 messagebox.showerror("任务停止", str(value))

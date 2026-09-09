@@ -16,6 +16,7 @@ from urllib.parse import parse_qs, urlparse
 from clean_cut.batch import BatchJob, BatchManifest, JobState, chunked, episode_stem
 from clean_cut.errors import MediaProcessError
 from clean_cut.libtv import detect_opening_cover_frames, restore_opening_cover_frames
+from clean_cut.tools import locate_executable
 
 StatusCallback = Callable[[BatchJob], None]
 
@@ -235,7 +236,7 @@ class LibTvWebBatchRunner:
 
     def _refresh_cli_login_from_browser(self, page) -> None:
         process = subprocess.Popen(
-            ["libtv", "login", "web"],
+            [locate_executable("libtv") or "libtv", "login", "web"],
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -972,7 +973,7 @@ class LibTvWebBatchRunner:
     def _run_libtv_json(arguments: list[str], *, timeout: float | None) -> dict:
         try:
             completed = subprocess.run(
-                ["libtv", *arguments],
+                [locate_executable("libtv") or "libtv", *arguments],
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
