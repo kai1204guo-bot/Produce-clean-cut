@@ -34,7 +34,11 @@ def run_command(
         text=True,
     )
     if result.returncode != 0:
-        detail = result.stderr.strip() or result.stdout.strip() or "未返回错误详情"
+        detail = (
+            result.stderr.strip()
+            or result.stdout.strip()
+            or f"进程退出码 {result.returncode}（未返回文字错误）"
+        )
         raise MediaProcessError(f"{description}失败：{detail}")
     if expected_output is not None and not expected_output.is_file():
         raise MediaProcessError(f"{description}失败：未生成预期文件 {expected_output}")

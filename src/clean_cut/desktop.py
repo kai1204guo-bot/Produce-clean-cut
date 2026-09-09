@@ -259,7 +259,16 @@ class CleanCutApp(tk.Tk):
                     srt_worker.join()
                 if srt_errors:
                     raise srt_errors[0]
-                self._events.put(("done", "全部任务处理完成。"))
+                if runner.last_failed_jobs:
+                    failed = "、".join(runner.last_failed_jobs)
+                    self._events.put(
+                        (
+                            "done",
+                            f"批次其余任务已处理完成；失败项可重新运行重试：{failed}",
+                        )
+                    )
+                else:
+                    self._events.put(("done", "全部任务处理完成。"))
             except Exception as exc:
                 self._stop_event.set()
                 self._events.put(("error", str(exc)))

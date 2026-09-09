@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import subprocess
 import tempfile
 import time
@@ -42,6 +43,7 @@ class LibTvWebBatchRunner:
         self.max_cloud_concurrency = max_cloud_concurrency
         self.status_callback = status_callback or (lambda _job: None)
         self.stop_requested = stop_requested or (lambda: False)
+        self.last_failed_jobs: list[str] = []
 
     def run(
         self,
@@ -265,38 +267,63 @@ class LibTvWebBatchRunner:
         self, page, context, manifest: BatchManifest, jobs: list[BatchJob], clean_dir: Path
     ) -> None:
         remaining = list(jobs)
+        failures: list[tuple[BatchJob, str]] = []
         while remaining:
             self._check_stop()
             node_ids = self._video_node_ids_by_name()
             for job in list(remaining):
-                output_name = f"视频一键去字幕-{job.source_path.stem}"
-                output_ids = node_ids.get(output_name, [])
-                if not output_ids:
-                    self._set(manifest, job, JobState.GENERATING, "等待云端创建任务节点")
-                    continue
-                details = self._canvas_node_details(output_ids[0])
-                media_url = self._media_url_from_details(details)
-                if media_url:
-                    self._download_one(context, manifest, job, clean_dir, media_url)
+                try:
+                    completed = self._poll_and_download_one(
+                        context, manifest, job, clean_dir, node_ids
+                    )
+                except Exception as exc:
+                    if self.stop_requested():
+                        raise
+                    detail = str(exc) or type(exc).__name__
+                    self._set(
+                        manifest,
+                        job,
+                        JobState.ERROR,
+                        f"本集失败，已继续下一集：{detail}",
+                    )
+                    failures.append((job, detail))
                     remaining.remove(job)
                     continue
-                task_info = details.get("data", {}).get("taskInfo", {})
-                if not task_info.get("taskId"):
-                    raise MediaProcessError(
-                        f"{job.source_path.name} 的去字幕节点尚未开始生成；"
-                        "程序已停止，请重新开始任务。"
-                    )
-                progress = int(task_info.get("progressPercent") or job.progress)
-                if task_info.get("loading") or progress < 100:
-                    self._set(
-                        manifest, job, JobState.GENERATING, f"生成中 {progress}%", progress
-                    )
-                    continue
-                raise MediaProcessError(
-                    f"{job.source_path.name} 的云端任务已结束，但未返回视频地址。"
-                )
+                if completed:
+                    remaining.remove(job)
             if remaining:
                 time.sleep(10)
+        self.last_failed_jobs = [
+            f"EP{job.episode}" if job.episode is not None else job.source_path.name
+            for job, _detail in failures
+        ]
+
+    def _poll_and_download_one(
+        self,
+        context,
+        manifest: BatchManifest,
+        job: BatchJob,
+        clean_dir: Path,
+        node_ids: dict[str, list[str]],
+    ) -> bool:
+        output_name = f"视频一键去字幕-{job.source_path.stem}"
+        output_ids = node_ids.get(output_name, [])
+        if not output_ids:
+            self._set(manifest, job, JobState.GENERATING, "等待云端创建任务节点")
+            return False
+        details = self._canvas_node_details(output_ids[0])
+        media_url = self._media_url_from_details(details)
+        if media_url:
+            self._download_one(context, manifest, job, clean_dir, media_url)
+            return True
+        task_info = details.get("data", {}).get("taskInfo", {})
+        if not task_info.get("taskId"):
+            raise MediaProcessError(f"{job.source_path.name} 的去字幕节点尚未开始生成。")
+        progress = int(task_info.get("progressPercent") or job.progress)
+        if task_info.get("loading") or progress < 100:
+            self._set(manifest, job, JobState.GENERATING, f"生成中 {progress}%", progress)
+            return False
+        raise MediaProcessError(f"{job.source_path.name} 的云端任务已结束，但未返回视频地址。")
 
     def _download_one(
         self,
@@ -329,7 +356,32 @@ class LibTvWebBatchRunner:
                 f"恢复封面前 {frame_count} 帧",
                 99,
             )
-            restore_opening_cover_frames(job.source_path, raw, output, frame_count=frame_count)
+            last_error: Exception | None = None
+            for attempt in range(2):
+                try:
+                    restore_opening_cover_frames(
+                        job.source_path, raw, output, frame_count=frame_count
+                    )
+                    last_error = None
+                    break
+                except Exception as exc:
+                    last_error = exc
+                    if attempt == 0:
+                        self._set(
+                            manifest,
+                            job,
+                            JobState.RESTORING_COVER,
+                            "封面恢复首次失败，正在重试",
+                            99,
+                        )
+                        time.sleep(2)
+            if last_error is not None:
+                fallback = clean_dir / f"{episode_stem(job.source_path)}-清水版-封面待恢复.mp4"
+                if not fallback.exists():
+                    shutil.move(str(raw), fallback)
+                job.clean_output = str(fallback)
+                manifest.save()
+                raise MediaProcessError(f"{last_error}；已保留清水视频：{fallback.name}")
         job.clean_output = str(output)
         self._set(manifest, job, JobState.COMPLETE, "处理完成", 100)
 
