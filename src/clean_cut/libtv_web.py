@@ -249,30 +249,44 @@ class LibTvWebBatchRunner:
     ) -> None:
         deadline = time.monotonic() + 600
         last_error = ""
+        missing_since: dict[str, float] = {}
         while time.monotonic() < deadline:
             self._check_stop()
             try:
                 node_ids = self._video_node_ids_by_name()
-                waiting = [
-                    job
-                    for job in jobs
-                    if not self._source_upload_ready(node_ids, job)
-                ]
+                waiting: list[BatchJob] = []
+                missing: list[BatchJob] = []
+                for job in jobs:
+                    if not node_ids.get(job.source_path.stem):
+                        missing.append(job)
+                        missing_since.setdefault(job.key, time.monotonic())
+                    elif not self._source_upload_ready(node_ids, job):
+                        waiting.append(job)
             except MediaProcessError as exc:
                 last_error = str(exc)
                 waiting = jobs
-            if not waiting:
+                missing = []
+            if not waiting and not missing:
                 return
-            names = "、".join(
-                f"EP{job.episode}" if job.episode is not None else job.source_path.name
-                for job in waiting
-            )
+            now = time.monotonic()
+            if missing and not waiting and all(
+                now - missing_since[job.key] >= 90 for job in missing
+            ):
+                # Let the caller retry only the files whose upload never created a node.
+                return
             for job in waiting:
                 self._set(
                     manifest=manifest,
                     job=job,
                     state=JobState.UPLOADING,
-                    message=f"后台查询上传状态：{names}",
+                    message="视频节点已创建，等待上传完成",
+                )
+            for job in missing:
+                self._set(
+                    manifest=manifest,
+                    job=job,
+                    state=JobState.UPLOADING,
+                    message="等待 LibTV 创建视频节点",
                 )
             page.wait_for_timeout(3_000)
         detail = f"；最后错误：{last_error}" if last_error else ""

@@ -21,10 +21,9 @@ from clean_cut.batch import (
 )
 from clean_cut.errors import CleanCutError
 from clean_cut.libtv_web import LibTvWebBatchRunner
+from clean_cut.tools import write_text_atomically
 
-DEFAULT_PROJECT_URL = (
-    "https://www.liblib.tv/canvas?spaceId=7887875&projectId=a282f30b20a04d8aac4e32d20f901f73"
-)
+PROJECT_URL_FILE = ".clean-cut-project-url.txt"
 
 
 class CleanCutApp(tk.Tk):
@@ -42,7 +41,7 @@ class CleanCutApp(tk.Tk):
         self.source_var = tk.StringVar()
         self.clean_var = tk.StringVar()
         self.srt_var = tk.StringVar()
-        self.project_var = tk.StringVar(value=DEFAULT_PROJECT_URL)
+        self.project_var = tk.StringVar()
         self.batch_var = tk.IntVar(value=15)
         self.skip_var = tk.BooleanVar(value=True)
         self.srt_enabled_var = tk.BooleanVar(value=True)
@@ -165,7 +164,17 @@ class CleanCutApp(tk.Tk):
         base = source.parent
         self.clean_var.set(str(base / "清水版"))
         self.srt_var.set(str(base / "srt"))
-        self._load_rows(discover_videos(source))
+        project_file = base / "清水版" / PROJECT_URL_FILE
+        if project_file.is_file():
+            self.project_var.set(project_file.read_text(encoding="utf-8").strip())
+        else:
+            self.project_var.set("")
+        videos = discover_videos(source)
+        self._load_rows(videos)
+        if not self.project_var.get():
+            self.summary_var.set(
+                f"已找到 {len(videos)} 集；请粘贴这部剧自己的 LibTV 画布网址"
+            )
 
     def _choose_dir(self, variable: tk.StringVar) -> None:
         folder = filedialog.askdirectory(title="选择输出文件夹")
@@ -231,7 +240,16 @@ class CleanCutApp(tk.Tk):
         def callback(job: BatchJob) -> None:
             self._events.put(("job", job))
 
-        runner = self._make_runner(callback)
+        try:
+            runner = self._make_runner(callback)
+        except ValueError as exc:
+            self.start_button.configure(state="normal")
+            self.stop_button.configure(state="disabled")
+            messagebox.showerror("无法开始", str(exc))
+            return
+        write_text_atomically(
+            clean / PROJECT_URL_FILE, self.project_var.get().strip() + "\n"
+        )
         srt_enabled = self.srt_enabled_var.get()
         srt_output = Path(self.srt_var.get())
         asr_device = self.asr_device_var.get()
