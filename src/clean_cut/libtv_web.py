@@ -162,8 +162,14 @@ class LibTvWebBatchRunner:
                 self._ensure_cli_access(page)
                 pending = self._prepare_jobs(manifest, clean_dir, skip_existing)
                 self._upload_all(page, manifest, pending)
-                self._submit_all(page, manifest, pending)
-                self._wait_and_download(page, context, manifest, pending, clean_dir)
+                upload_failures = [job for job in pending if job.state == JobState.ERROR]
+                ready = [job for job in pending if job.state != JobState.ERROR]
+                self._submit_all(page, manifest, ready)
+                self._wait_and_download(page, context, manifest, ready, clean_dir)
+                self.last_failed_jobs = [
+                    f"EP{job.episode}" if job.episode is not None else job.source_path.name
+                    for job in upload_failures
+                ] + self.last_failed_jobs
             finally:
                 context.close()
 
@@ -302,10 +308,18 @@ class LibTvWebBatchRunner:
                     manifest,
                     job,
                     JobState.UPLOADING,
-                    "批量上传未生成节点，正在单集补传",
+                    "批量上传漏传，正在使用官方 CLI 单集补传",
                 )
-                self._upload_files(page, [job.source_path])
-                self._wait_for_uploads(page, manifest, [job])
+                try:
+                    self._upload_file_with_cli(job)
+                except MediaProcessError as exc:
+                    self._set(
+                        manifest,
+                        job,
+                        JobState.ERROR,
+                        f"单集上传失败，已继续下一集：{exc}",
+                    )
+                    continue
                 self._reload_canvas(page)
                 node_ids = self._video_node_ids_by_name()
                 if not self._source_node_exists(node_ids, job):
@@ -315,12 +329,30 @@ class LibTvWebBatchRunner:
                         JobState.ERROR,
                         "LibTV 未生成视频节点，已停止且未提交付费任务",
                     )
-                    raise MediaProcessError(
-                        f"{job.source_path.name} 上传后仍未生成画布节点；"
-                        "程序已在付费提交前安全停止。"
-                    )
+                    continue
             for job in related:
-                self._set(manifest, job, JobState.UPLOADED, "上传完成")
+                if job.state != JobState.ERROR:
+                    self._set(manifest, job, JobState.UPLOADED, "上传完成")
+
+    def _upload_file_with_cli(self, job: BatchJob) -> None:
+        payload = self._run_libtv_json(
+            [
+                "upload",
+                job.source_path.stem,
+                "-f",
+                str(job.source_path.resolve()),
+                "-p",
+                self.project_id,
+                "-t",
+                "video",
+            ],
+            timeout=900,
+        )
+        node_id = payload.get("nodeKey") or payload.get("id")
+        if not isinstance(node_id, str) or not node_id:
+            raise MediaProcessError(
+                f"{job.source_path.name} 已上传，但 CLI 未返回视频节点编号。"
+            )
 
     def _upload_files(self, page, paths: list[Path]) -> None:
         page.get_by_role("button", name="添加节点", exact=True).click()
@@ -849,11 +881,17 @@ class LibTvWebBatchRunner:
                 timeout=timeout,
                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             )
-            payload = json.loads(completed.stdout)
+            try:
+                payload = json.loads(completed.stdout)
+            except json.JSONDecodeError as exc:
+                detail = (completed.stderr or completed.stdout or str(exc)).strip()
+                raise MediaProcessError(
+                    f"LibTV CLI 操作失败：{detail[:500]}"
+                ) from exc
         except subprocess.CalledProcessError as exc:
             detail = (exc.stderr or exc.stdout or str(exc)).strip()
             raise MediaProcessError(f"LibTV CLI 查询失败：{detail[:500]}") from exc
-        except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+        except (OSError, subprocess.SubprocessError) as exc:
             detail = str(exc).strip() or type(exc).__name__
             raise MediaProcessError(f"LibTV CLI 查询失败：{detail[:500]}") from exc
         if not isinstance(payload, dict):

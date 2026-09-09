@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from clean_cut.batch import BatchJob, BatchManifest, JobState
+from clean_cut.errors import MediaProcessError
 from clean_cut.libtv_web import LibTvWebBatchRunner
 
 PROJECT_ID = "a282f30b20a04d8aac4e32d20f901f73"
@@ -206,3 +207,70 @@ def test_source_upload_ready_uses_cli_media_url(tmp_path: Path) -> None:
         assert runner._source_upload_ready({"EP9": ["node-9"]}, job)
 
     assert not runner._source_upload_ready({}, job)
+
+
+def test_single_upload_fallback_uses_official_cli(tmp_path: Path) -> None:
+    runner = make_runner()
+    job = BatchJob(source=str(tmp_path / "EP1.mp4"), episode=1)
+    completed = type(
+        "Completed", (), {"stdout": json.dumps({"nodeKey": "video-node-1"})}
+    )()
+
+    with patch("clean_cut.libtv_web.subprocess.run", return_value=completed) as run:
+        runner._upload_file_with_cli(job)
+
+    assert run.call_args.args[0] == [
+        "libtv",
+        "upload",
+        "EP1",
+        "-f",
+        str(job.source_path.resolve()),
+        "-p",
+        PROJECT_ID,
+        "-t",
+        "video",
+    ]
+
+
+def test_upload_failure_does_not_stop_remaining_jobs(tmp_path: Path) -> None:
+    runner = make_runner()
+    first = BatchJob(source=str(tmp_path / "EP1.mp4"), episode=1)
+    second = BatchJob(source=str(tmp_path / "EP2.mp4"), episode=2)
+    manifest = BatchManifest(tmp_path / "manifest.json", [first, second])
+    page = MagicMock()
+
+    with (
+        patch.object(
+            runner,
+            "_video_node_ids_by_name",
+            side_effect=[{}, {}, {}, {"EP2": ["node-2"]}],
+        ),
+        patch.object(runner, "_upload_files"),
+        patch.object(runner, "_wait_for_uploads"),
+        patch.object(runner, "_reload_canvas"),
+        patch.object(
+            runner,
+            "_upload_file_with_cli",
+            side_effect=[MediaProcessError("视频审核未通过"), None],
+        ) as upload,
+    ):
+        runner._upload_all(page, manifest, [first, second])
+
+    assert upload.call_count == 2
+    assert first.state is JobState.ERROR
+    assert "视频审核未通过" in first.message
+    assert second.state is JobState.UPLOADED
+
+
+def test_non_json_cli_error_keeps_official_message() -> None:
+    completed = type(
+        "Completed",
+        (),
+        {"stdout": "视频审核未通过", "stderr": ""},
+    )()
+
+    with (
+        patch("clean_cut.libtv_web.subprocess.run", return_value=completed),
+        pytest.raises(MediaProcessError, match="视频审核未通过"),
+    ):
+        LibTvWebBatchRunner._run_libtv_json(["upload"], timeout=1)

@@ -327,7 +327,7 @@ class CleanCutApp(tk.Tk):
                     self._events.put(
                         (
                             "done",
-                            f"批次其余任务已处理完成；以下项目自动重试 5 次后仍失败，"
+                            f"批次其余任务已处理完成；以下项目仍未完成，"
                             f"可重新运行继续：{failed}",
                         )
                     )
@@ -454,9 +454,10 @@ class CleanCutApp(tk.Tk):
                 failed, retry_answer = value
                 retry = messagebox.askyesno(
                     "仍有未完成任务",
-                    f"以下项目连续失败 5 次：{failed}\n\n"
+                    f"以下项目仍未完成：{failed}\n\n"
                     "是否继续重试未完成任务？\n"
-                    "继续会复用画布中已有的付费任务，不重复提交已生成项目。",
+                    "继续会复用画布中已有的付费任务，不重复提交已生成项目。\n"
+                    "如果 LibTV 已明确提示视频审核未通过，建议选择“否”。",
                 )
                 self.summary_var.set(
                     "正在继续重试未完成任务" if retry else "已停止重试未完成任务"
