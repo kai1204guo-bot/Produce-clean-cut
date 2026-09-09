@@ -224,6 +224,44 @@ def test_active_cloud_task_count_syncs_visible_progress(tmp_path: Path) -> None:
     assert completed_job.message == "云端生成完成，等待下载"
 
 
+def test_downloads_completed_result_during_submission(tmp_path: Path) -> None:
+    runner = make_runner()
+    first = BatchJob(source=str(tmp_path / "EP1.mp4"), episode=1)
+    second = BatchJob(source=str(tmp_path / "EP2.mp4"), episode=2)
+    manifest = BatchManifest(tmp_path / "state.json", [first, second])
+    context = object()
+    details = {
+        "data": {
+            "url": ["https://example.test/clean.mp4"],
+            "taskInfo": {"taskId": "done", "status": 2, "progressPercent": 100},
+        }
+    }
+
+    with (
+        patch.object(
+            runner,
+            "_video_node_ids_by_name",
+            return_value={
+                "视频一键去字幕-EP1": ["output-1"],
+                "视频一键去字幕-EP2": ["output-2"],
+            },
+        ),
+        patch.object(runner, "_canvas_node_details", return_value=details),
+        patch.object(runner, "_download_one") as download,
+    ):
+        assert runner._download_one_ready_output(
+            context, manifest, [first, second], tmp_path
+        )
+
+    download.assert_called_once_with(
+        context,
+        manifest,
+        first,
+        tmp_path,
+        "https://example.test/clean.mp4",
+    )
+
+
 def test_wait_and_download_retries_transient_episode_failure(tmp_path: Path) -> None:
     source = tmp_path / "EP1.mp4"
     job = BatchJob(source=str(source), episode=1)

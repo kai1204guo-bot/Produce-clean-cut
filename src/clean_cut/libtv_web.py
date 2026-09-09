@@ -164,7 +164,7 @@ class LibTvWebBatchRunner:
                 self._upload_all(page, manifest, pending)
                 upload_failures = [job for job in pending if job.state == JobState.ERROR]
                 ready = [job for job in pending if job.state != JobState.ERROR]
-                self._submit_all(page, manifest, ready)
+                self._submit_all(page, context, manifest, ready, clean_dir)
                 self._wait_and_download(page, context, manifest, ready, clean_dir)
                 self.last_failed_jobs = [
                     f"EP{job.episode}" if job.episode is not None else job.source_path.name
@@ -428,9 +428,18 @@ class LibTvWebBatchRunner:
     def _source_node_exists(node_ids: dict[str, list[str]], job: BatchJob) -> bool:
         return bool(node_ids.get(job.source_path.stem))
 
-    def _submit_all(self, page, manifest: BatchManifest, jobs: list[BatchJob]) -> None:
+    def _submit_all(
+        self,
+        page,
+        context,
+        manifest: BatchManifest,
+        jobs: list[BatchJob],
+        clean_dir: Path,
+    ) -> None:
         for job in jobs:
             self._check_stop()
+            if job.state in {JobState.COMPLETE, JobState.SKIPPED}:
+                continue
             node_ids = self._video_node_ids_by_name()
             output_name = f"视频一键去字幕-{job.source_path.stem}"
             output_ids = node_ids.get(output_name, [])
@@ -447,7 +456,9 @@ class LibTvWebBatchRunner:
                 self._reload_canvas(page)
                 node_ids = self._video_node_ids_by_name()
                 self._set(manifest, job, JobState.UPLOADED, "已清理未启动节点，正在重新提交")
-            self._wait_for_cloud_slot(page, manifest, job)
+            self._wait_for_cloud_slot(
+                page, context, manifest, job, jobs, clean_dir
+            )
             while True:
                 self._select_named_canvas_node(
                     page,
@@ -502,7 +513,11 @@ class LibTvWebBatchRunner:
     def _wait_and_download(
         self, page, context, manifest: BatchManifest, jobs: list[BatchJob], clean_dir: Path
     ) -> None:
-        remaining = list(jobs)
+        remaining = [
+            job
+            for job in jobs
+            if job.state not in {JobState.COMPLETE, JobState.SKIPPED, JobState.ERROR}
+        ]
         failures: list[tuple[BatchJob, str]] = []
         retry_counts: dict[str, int] = {}
         node_query_failures = 0
@@ -734,9 +749,18 @@ class LibTvWebBatchRunner:
             self._check_stop()
             page.wait_for_timeout(1_000)
 
-    def _wait_for_cloud_slot(self, page, manifest: BatchManifest, job: BatchJob) -> None:
+    def _wait_for_cloud_slot(
+        self,
+        page,
+        context,
+        manifest: BatchManifest,
+        job: BatchJob,
+        jobs: list[BatchJob],
+        clean_dir: Path,
+    ) -> None:
         while True:
             self._check_stop()
+            self._download_one_ready_output(context, manifest, jobs, clean_dir)
             active = self._active_cloud_task_count(manifest)
             if active < self.max_cloud_concurrency:
                 return
@@ -747,6 +771,48 @@ class LibTvWebBatchRunner:
                 f"云端并发 {active}/{self.max_cloud_concurrency}，等待空闲名额",
             )
             self._wait_before_submit_retry(page, seconds=10)
+
+    def _download_one_ready_output(
+        self,
+        context,
+        manifest: BatchManifest,
+        jobs: list[BatchJob],
+        clean_dir: Path,
+    ) -> bool:
+        """Download one completed cloud result while later jobs are still submitting."""
+        node_ids = self._video_node_ids_by_name()
+        for candidate in jobs:
+            if candidate.state in {
+                JobState.COMPLETE,
+                JobState.SKIPPED,
+                JobState.ERROR,
+                JobState.DOWNLOADING,
+                JobState.RESTORING_COVER,
+            }:
+                continue
+            output_name = f"视频一键去字幕-{candidate.source_path.stem}"
+            output_ids = node_ids.get(output_name, [])
+            if not output_ids:
+                continue
+            details = self._canvas_node_details(output_ids[0])
+            media_url = self._media_url_from_details(details)
+            if not media_url:
+                continue
+            try:
+                self._download_one(context, manifest, candidate, clean_dir, media_url)
+            except Exception as exc:
+                if self.stop_requested():
+                    raise
+                detail = str(exc) or type(exc).__name__
+                self._set(
+                    manifest,
+                    candidate,
+                    JobState.GENERATING,
+                    f"即时下载临时失败，稍后重试：{detail}",
+                    100,
+                )
+            return True
+        return False
 
     def _active_cloud_task_count(self, manifest: BatchManifest | None = None) -> int:
         node_ids = self._video_node_ids_by_name()
