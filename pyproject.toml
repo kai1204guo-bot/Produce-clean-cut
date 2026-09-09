@@ -30,6 +30,10 @@ ocr-gpu = [
 asr = [
     "faster-whisper>=1.2,<2",
 ]
+desktop = [
+    "faster-whisper>=1.2,<2",
+    "playwright>=1.55,<2",
+]
 dev = [
     "pillow>=11,<13",
     "ruff>=0.12,<1",
@@ -37,6 +41,7 @@ dev = [
 
 [project.scripts]
 clean-cut = "clean_cut.cli:main"
+clean-cut-gui = "clean_cut.desktop:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/clean_cut"]
