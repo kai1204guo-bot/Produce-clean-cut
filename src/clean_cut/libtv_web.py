@@ -100,14 +100,7 @@ class LibTvWebBatchRunner:
             job.clean_output = str(output)
             if skip_existing and output.exists() and output.stat().st_size > 0:
                 self._set(manifest, job, JobState.SKIPPED, "成品已存在，已跳过", 100)
-            elif job.state == JobState.SUBMITTING:
-                self._set(
-                    manifest,
-                    job,
-                    JobState.NEEDS_REVIEW,
-                    "上次在提交阶段中断，为避免重复扣积分，请检查画布",
-                )
-            elif job.state not in {JobState.COMPLETE, JobState.SKIPPED, JobState.NEEDS_REVIEW}:
+            elif job.state not in {JobState.COMPLETE, JobState.SKIPPED}:
                 pending.append(job)
         return pending
 
@@ -214,26 +207,44 @@ class LibTvWebBatchRunner:
                 self._reload_canvas(page)
                 node_ids = self._video_node_ids_by_name()
                 self._set(manifest, job, JobState.UPLOADED, "已清理未启动节点，正在重新提交")
-            self._select_named_canvas_node(
-                page,
-                job.source_path.stem,
-                node_ids,
-                f"{job.source_path.name} 的画布视频节点不存在；"
-                "已在付费提交前安全停止。",
-            )
-            smart_erase = page.get_by_role("button", name="智能去字幕", exact=True)
-            smart_erase.wait_for(state="attached", timeout=30_000)
-            smart_erase.dispatch_event("click")
-            page.get_by_text("智能擦除", exact=True).wait_for(state="visible", timeout=30_000)
-            generate = page.get_by_text("智能擦除", exact=True).locator(
-                "xpath=following::button[1]"
-            )
-            if generate.count() != 1:
-                raise MediaProcessError(f"无法唯一识别 {job.source_path.name} 的生成按钮。")
-            self._set(manifest, job, JobState.SUBMITTING, "正在提交，禁止自动重试")
-            generate.dispatch_event("click")
-            output_id = self._wait_for_output_id(output_name)
-            if output_id is None:
+            while True:
+                self._select_named_canvas_node(
+                    page,
+                    job.source_path.stem,
+                    node_ids,
+                    f"{job.source_path.name} 的画布视频节点不存在；"
+                    "已在付费提交前安全停止。",
+                )
+                smart_erase = page.get_by_role("button", name="智能去字幕", exact=True)
+                smart_erase.wait_for(state="attached", timeout=30_000)
+                smart_erase.dispatch_event("click")
+                page.get_by_text("智能擦除", exact=True).wait_for(
+                    state="visible", timeout=30_000
+                )
+                generate = page.get_by_text("智能擦除", exact=True).locator(
+                    "xpath=following::button[1]"
+                )
+                if generate.count() != 1:
+                    raise MediaProcessError(
+                        f"无法唯一识别 {job.source_path.name} 的生成按钮。"
+                    )
+                self._set(manifest, job, JobState.SUBMITTING, "正在提交，禁止自动重试")
+                generate.dispatch_event("click")
+                output_id, concurrency_limited = self._wait_for_output_id(
+                    page, output_name
+                )
+                if output_id is not None:
+                    break
+                if concurrency_limited:
+                    self._set(
+                        manifest,
+                        job,
+                        JobState.UPLOADED,
+                        "LibTV 并发已满，已关闭推广弹窗，等待空闲名额",
+                    )
+                    self._wait_before_submit_retry(page, seconds=20)
+                    node_ids = self._video_node_ids_by_name()
+                    continue
                 raise MediaProcessError(
                     f"{job.source_path.name} 的提交结果无法确认；为避免重复扣费，已停止。"
                 )
@@ -376,15 +387,60 @@ class LibTvWebBatchRunner:
         self._fit_canvas_to_screen(page)
         return self._canvas_node_by_ids(page, node_ids)
 
-    def _wait_for_output_id(self, output_name: str) -> str | None:
+    def _wait_for_output_id(self, page, output_name: str) -> tuple[str | None, bool]:
         deadline = time.monotonic() + 60
         while time.monotonic() < deadline:
             self._check_stop()
             node_ids = self._video_node_ids_by_name().get(output_name, [])
             if node_ids:
-                return node_ids[0]
-            time.sleep(1)
-        return None
+                return node_ids[0], False
+            if self._dismiss_concurrency_modal(page):
+                return None, True
+            page.wait_for_timeout(1_000)
+        return None, False
+
+    def _wait_before_submit_retry(self, page, *, seconds: int) -> None:
+        for _ in range(seconds):
+            self._check_stop()
+            page.wait_for_timeout(1_000)
+
+    @staticmethod
+    def _dismiss_concurrency_modal(page) -> bool:
+        message = page.get_by_text(re.compile(r"并发任务数超过限制"))
+        visible = [item for item in message.all() if item.is_visible()]
+        if not visible:
+            return False
+
+        dialog = visible[0].locator("xpath=ancestor::*[@role='dialog'][1]")
+        if dialog.count() == 0:
+            dialog = visible[0].locator(
+                "xpath=ancestor::*[contains(@class,'mantine-Modal-content')][1]"
+            )
+        if dialog.count() == 0:
+            raise MediaProcessError("识别到 LibTV 并发限制弹窗，但无法定位关闭按钮。")
+
+        named_close = dialog.get_by_role("button", name=re.compile(r"关闭|close", re.I))
+        if named_close.count():
+            named_close.first.click(force=True)
+            return True
+
+        dialog_box = dialog.bounding_box()
+        candidates = []
+        for button in dialog.locator("button").all():
+            box = button.bounding_box()
+            if box and not button.inner_text().strip():
+                candidates.append((button, box))
+        if dialog_box and candidates:
+            right = dialog_box["x"] + dialog_box["width"]
+            top = dialog_box["y"]
+            button, _box = min(
+                candidates,
+                key=lambda item: abs(item[1]["x"] + item[1]["width"] - right)
+                + abs(item[1]["y"] - top),
+            )
+            button.click(force=True)
+            return True
+        raise MediaProcessError("识别到 LibTV 并发限制弹窗，但无法定位右上角 X。")
 
     def _wait_for_output_started(self, output_id: str) -> dict | None:
         deadline = time.monotonic() + 60
