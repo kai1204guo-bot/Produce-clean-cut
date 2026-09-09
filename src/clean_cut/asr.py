@@ -27,6 +27,18 @@ _CUDA_DLL_NAMES = (
 )
 
 
+def default_cuda_dll_dirs() -> tuple[Path, ...]:
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if not local_app_data:
+        return ()
+    root = Path(local_app_data) / "ProduceCleanCut" / "cuda-runtime" / "nvidia"
+    return (
+        root / "cuda_runtime" / "bin",
+        root / "cublas" / "bin",
+        root / "cudnn" / "bin",
+    )
+
+
 class FasterWhisperTranscriber:
     def __init__(
         self,
@@ -38,8 +50,13 @@ class FasterWhisperTranscriber:
         cuda_dll_dir: Path | None = None,
     ) -> None:
         self._dll_handles: list[Any] = []
-        if device == "cuda" and os.name == "nt" and cuda_dll_dir is not None:
-            self._load_cuda_dlls(cuda_dll_dir)
+        if device == "cuda" and os.name == "nt":
+            if cuda_dll_dir is not None:
+                self._load_cuda_dlls((cuda_dll_dir,))
+            else:
+                automatic_dirs = default_cuda_dll_dirs()
+                if any(directory.is_dir() for directory in automatic_dirs):
+                    self._load_cuda_dlls(automatic_dirs)
         try:
             from faster_whisper import WhisperModel
         except ImportError as exc:
@@ -56,18 +73,27 @@ class FasterWhisperTranscriber:
         except RuntimeError as exc:
             raise CleanCutError(f"无法加载 Faster-Whisper 模型：{exc}") from exc
 
-    def _load_cuda_dlls(self, directory: Path) -> None:
-        directory = directory.resolve()
-        missing = [name for name in _CUDA_DLL_NAMES if not (directory / name).is_file()]
+    def _load_cuda_dlls(self, directories: Iterable[Path]) -> None:
+        resolved = tuple(directory.resolve() for directory in directories)
+        files = {
+            path.name.casefold(): path
+            for directory in resolved
+            if directory.is_dir()
+            for path in directory.iterdir()
+            if path.is_file()
+        }
+        missing = [name for name in _CUDA_DLL_NAMES if name.casefold() not in files]
         if missing:
             raise CleanCutError(
-                f"CUDA DLL 目录不完整：{directory}；缺少 {', '.join(missing)}"
+                f"CUDA DLL 目录不完整：{', '.join(map(str, resolved))}；"
+                f"缺少 {', '.join(missing)}"
             )
         try:
-            self._dll_handles = [
-                ctypes.WinDLL(str(directory / name))  # type: ignore[attr-defined]
+            self._dll_handles.extend(os.add_dll_directory(str(directory)) for directory in resolved)
+            self._dll_handles.extend(
+                ctypes.WinDLL(str(files[name.casefold()]))  # type: ignore[attr-defined]
                 for name in _CUDA_DLL_NAMES
-            ]
+            )
         except OSError as exc:
             raise CleanCutError(f"无法加载 CUDA DLL：{exc}") from exc
 
