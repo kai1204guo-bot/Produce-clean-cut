@@ -190,13 +190,14 @@ class LibTvWebBatchRunner:
                 self._set(manifest, job, JobState.SUBMITTED, "画布任务已存在")
                 continue
             source_node = page.get_by_text(job.source_path.stem, exact=True)
-            if source_node.count() != 1:
-                raise MediaProcessError(
-                    f"{job.source_path.name} 的画布视频节点不存在或不唯一；"
-                    "已在付费提交前安全停止。"
-                )
-            source_node.click(timeout=120_000)
-            page.get_by_role("button", name="智能去字幕", exact=True).click()
+            self._select_canvas_node(
+                source_node,
+                f"{job.source_path.name} 的画布视频节点不存在或不唯一；"
+                "已在付费提交前安全停止。",
+            )
+            smart_erase = page.get_by_role("button", name="智能去字幕", exact=True)
+            smart_erase.wait_for(state="visible", timeout=30_000)
+            smart_erase.click()
             page.get_by_text("智能擦除", exact=True).wait_for(state="visible", timeout=30_000)
             generate = page.get_by_text("智能擦除", exact=True).locator(
                 "xpath=following::button[1]"
@@ -235,7 +236,10 @@ class LibTvWebBatchRunner:
         self, page, context, manifest, job, clean_dir: Path, output_name: str
     ) -> None:
         self._set(manifest, job, JobState.DOWNLOADING, "正在下载清水版")
-        page.get_by_text(output_name, exact=True).click()
+        self._select_canvas_node(
+            page.get_by_text(output_name, exact=True),
+            f"{job.source_path.name} 的去字幕结果节点不存在或不唯一。",
+        )
         video = page.locator("video:visible").first
         video.wait_for(state="visible", timeout=60_000)
         media_url = video.evaluate("element => element.currentSrc || element.src")
@@ -267,6 +271,17 @@ class LibTvWebBatchRunner:
             restore_opening_cover_frames(job.source_path, raw, output, frame_count=frame_count)
         job.clean_output = str(output)
         self._set(manifest, job, JobState.COMPLETE, "处理完成", 100)
+
+    @staticmethod
+    def _select_canvas_node(label, error_message: str) -> None:
+        if label.count() != 1:
+            raise MediaProcessError(error_message)
+        node = label.locator(
+            "xpath=ancestor::*[contains(@class,'react-flow__node')][1]"
+        )
+        if node.count() != 1:
+            raise MediaProcessError(error_message)
+        node.dispatch_event("click")
 
     def _set(
         self,
