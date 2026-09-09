@@ -202,7 +202,7 @@ class LibTvWebBatchRunner:
             for job in related:
                 self._set(manifest, job, JobState.UPLOADING, f"上传第 {batch_index} 批")
             self._upload_files(page, batch)
-            self._wait_for_uploads(page, related)
+            self._wait_for_uploads(page, manifest, related)
             self._reload_canvas(page)
 
             node_ids = self._video_node_ids_by_name()
@@ -221,7 +221,7 @@ class LibTvWebBatchRunner:
                     "批量上传未生成节点，正在单集补传",
                 )
                 self._upload_files(page, [job.source_path])
-                self._wait_for_uploads(page, [job])
+                self._wait_for_uploads(page, manifest, [job])
                 self._reload_canvas(page)
                 node_ids = self._video_node_ids_by_name()
                 if not self._source_node_exists(node_ids, job):
@@ -244,20 +244,50 @@ class LibTvWebBatchRunner:
             page.get_by_role("button", name="上传", exact=True).click()
         chooser_info.value.set_files([str(path) for path in paths])
 
-    def _wait_for_uploads(self, page, jobs: list[BatchJob]) -> None:
-        for job in jobs:
-            page.get_by_text(job.source_path.stem, exact=True).wait_for(
-                state="visible", timeout=600_000
-            )
+    def _wait_for_uploads(
+        self, page, manifest: BatchManifest, jobs: list[BatchJob]
+    ) -> None:
         deadline = time.monotonic() + 600
+        last_error = ""
         while time.monotonic() < deadline:
-            uploading = page.get_by_text(re.compile(r"上传中"))
-            if not any(item.is_visible() for item in uploading.all()):
-                page.wait_for_timeout(3_000)
-                return
             self._check_stop()
-            page.wait_for_timeout(1_000)
-        raise MediaProcessError("等待 LibTV 上传完成超时；尚未提交付费任务。")
+            try:
+                node_ids = self._video_node_ids_by_name()
+                waiting = [
+                    job
+                    for job in jobs
+                    if not self._source_upload_ready(node_ids, job)
+                ]
+            except MediaProcessError as exc:
+                last_error = str(exc)
+                waiting = jobs
+            if not waiting:
+                return
+            names = "、".join(
+                f"EP{job.episode}" if job.episode is not None else job.source_path.name
+                for job in waiting
+            )
+            for job in waiting:
+                self._set(
+                    manifest=manifest,
+                    job=job,
+                    state=JobState.UPLOADING,
+                    message=f"后台查询上传状态：{names}",
+                )
+            page.wait_for_timeout(3_000)
+        detail = f"；最后错误：{last_error}" if last_error else ""
+        raise MediaProcessError(
+            f"等待 LibTV 上传完成超时{detail}；尚未提交付费任务。"
+        )
+
+    def _source_upload_ready(
+        self, node_ids: dict[str, list[str]], job: BatchJob
+    ) -> bool:
+        for node_id in node_ids.get(job.source_path.stem, []):
+            details = self._canvas_node_details(node_id)
+            if self._media_url_from_details(details):
+                return True
+        return False
 
     def _reload_canvas(self, page) -> None:
         page.reload(wait_until="domcontentloaded", timeout=120_000)

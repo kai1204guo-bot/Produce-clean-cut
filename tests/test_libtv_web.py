@@ -132,3 +132,16 @@ def test_wait_and_download_retries_transient_episode_failure(tmp_path: Path) -> 
     assert poll.call_count == 2
     assert runner.last_failed_jobs == []
     assert job.state is JobState.GENERATING
+
+
+def test_source_upload_ready_uses_cli_media_url(tmp_path: Path) -> None:
+    runner = make_runner()
+    job = BatchJob(source=str(tmp_path / "EP9.mp4"), episode=9)
+    with patch.object(
+        runner,
+        "_canvas_node_details",
+        return_value={"data": {"url": ["https://example.test/EP9.mp4"]}},
+    ):
+        assert runner._source_upload_ready({"EP9": ["node-9"]}, job)
+
+    assert not runner._source_upload_ready({}, job)
