@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import json
 import re
+import subprocess
 import tempfile
 import time
 import urllib.request
 from collections.abc import Callable
 from pathlib import Path
+from urllib.parse import parse_qs, urlparse
 
 from clean_cut.batch import BatchJob, BatchManifest, JobState, chunked, episode_stem
 from clean_cut.errors import MediaProcessError
@@ -29,6 +32,10 @@ class LibTvWebBatchRunner:
         if not re.fullmatch(r"https://www\.liblib\.tv/canvas\?.+", project_url):
             raise ValueError("请输入完整的 LibTV 画布网址。")
         self.project_url = project_url
+        project_ids = parse_qs(urlparse(project_url).query).get("projectId", [])
+        if len(project_ids) != 1 or not re.fullmatch(r"[A-Za-z0-9_-]+", project_ids[0]):
+            raise ValueError("LibTV 画布网址缺少有效的 projectId。")
+        self.project_id = project_ids[0]
         self.profile_dir = profile_dir.resolve()
         self.batch_size = batch_size
         self.status_callback = status_callback or (lambda _job: None)
@@ -112,9 +119,8 @@ class LibTvWebBatchRunner:
             raise MediaProcessError("LibTV 尚未登录，请先点击“登录 LibTV”。")
 
     def _upload_all(self, page, manifest: BatchManifest, jobs: list[BatchJob]) -> None:
-        upload_jobs = [
-            job for job in jobs if page.get_by_text(job.source_path.stem, exact=True).count() == 0
-        ]
+        node_ids = self._video_node_ids_by_name()
+        upload_jobs = [job for job in jobs if job.source_path.stem not in node_ids]
         for batch_index, batch in enumerate(
             chunked((job.source_path for job in upload_jobs), self.batch_size), 1
         ):
@@ -126,13 +132,13 @@ class LibTvWebBatchRunner:
             self._wait_for_uploads(page, related)
             self._reload_canvas(page)
 
-            missing = [job for job in related if not self._source_node_exists(page, job)]
+            node_ids = self._video_node_ids_by_name()
+            missing = [job for job in related if not self._source_node_exists(node_ids, job)]
             if missing:
                 page.wait_for_timeout(15_000)
                 self._reload_canvas(page)
-                missing = [
-                    job for job in related if not self._source_node_exists(page, job)
-                ]
+                node_ids = self._video_node_ids_by_name()
+                missing = [job for job in related if not self._source_node_exists(node_ids, job)]
             for job in missing:
                 self._check_stop()
                 self._set(
@@ -144,7 +150,8 @@ class LibTvWebBatchRunner:
                 self._upload_files(page, [job.source_path])
                 self._wait_for_uploads(page, [job])
                 self._reload_canvas(page)
-                if not self._source_node_exists(page, job):
+                node_ids = self._video_node_ids_by_name()
+                if not self._source_node_exists(node_ids, job):
                     self._set(
                         manifest,
                         job,
@@ -185,19 +192,21 @@ class LibTvWebBatchRunner:
         page.wait_for_timeout(3_000)
 
     @staticmethod
-    def _source_node_exists(page, job: BatchJob) -> bool:
-        return page.get_by_text(job.source_path.stem, exact=True).count() > 0
+    def _source_node_exists(node_ids: dict[str, list[str]], job: BatchJob) -> bool:
+        return bool(node_ids.get(job.source_path.stem))
 
     def _submit_all(self, page, manifest: BatchManifest, jobs: list[BatchJob]) -> None:
+        node_ids = self._video_node_ids_by_name()
         for job in jobs:
             self._check_stop()
             output_name = f"视频一键去字幕-{job.source_path.stem}"
-            if page.get_by_text(output_name, exact=True).count():
+            if node_ids.get(output_name):
                 self._set(manifest, job, JobState.SUBMITTED, "画布任务已存在")
                 continue
-            source_node = page.get_by_text(job.source_path.stem, exact=True)
-            self._select_canvas_node(
-                source_node,
+            self._select_named_canvas_node(
+                page,
+                job.source_path.stem,
+                node_ids,
                 f"{job.source_path.name} 的画布视频节点不存在；"
                 "已在付费提交前安全停止。",
             )
@@ -220,30 +229,48 @@ class LibTvWebBatchRunner:
         remaining = list(jobs)
         while remaining:
             self._check_stop()
+            node_ids = self._video_node_ids_by_name()
             for job in list(remaining):
                 output_name = f"视频一键去字幕-{job.source_path.stem}"
-                output_label = page.get_by_text(output_name, exact=True)
-                if output_label.count() == 0:
+                output_ids = node_ids.get(output_name, [])
+                if not output_ids:
                     self._set(manifest, job, JobState.GENERATING, "等待云端创建任务节点")
                     continue
-                card_text = output_label.locator("xpath=ancestor::*[contains(., '生成中')][1]")
-                if card_text.count():
-                    text = card_text.first.inner_text()
+                output_node = self._canvas_node_by_ids(page, output_ids)
+                if output_node is None:
+                    self._reload_canvas(page)
+                    output_node = self._canvas_node_by_ids(page, output_ids)
+                if output_node is None:
+                    self._set(manifest, job, JobState.GENERATING, "结果节点同步中")
+                    continue
+                text = output_node.inner_text()
+                if "生成中" in text:
                     match = re.search(r"生成中\s*(\d+)%", text)
                     progress = int(match.group(1)) if match else job.progress
                     self._set(manifest, job, JobState.GENERATING, f"生成中 {progress}%", progress)
                     continue
-                self._download_one(page, context, manifest, job, clean_dir, output_name)
+                self._download_one(
+                    page, context, manifest, job, clean_dir, output_name, node_ids
+                )
                 remaining.remove(job)
             if remaining:
                 time.sleep(10)
 
     def _download_one(
-        self, page, context, manifest, job, clean_dir: Path, output_name: str
+        self,
+        page,
+        context,
+        manifest,
+        job,
+        clean_dir: Path,
+        output_name: str,
+        node_ids: dict[str, list[str]],
     ) -> None:
         self._set(manifest, job, JobState.DOWNLOADING, "正在下载清水版")
-        self._select_canvas_node(
-            page.get_by_text(output_name, exact=True),
+        self._select_named_canvas_node(
+            page,
+            output_name,
+            node_ids,
             f"{job.source_path.name} 的去字幕结果节点不存在或不唯一。",
         )
         video = page.locator("video:visible").first
@@ -288,6 +315,58 @@ class LibTvWebBatchRunner:
         if node.count() != 1:
             raise MediaProcessError(error_message)
         node.dispatch_event("click")
+
+    @staticmethod
+    def _canvas_node_by_ids(page, node_ids: list[str]):
+        for node_id in node_ids:
+            node = page.locator(f'[data-id="{node_id}"]')
+            if node.count():
+                return node.first
+        return None
+
+    def _select_named_canvas_node(
+        self,
+        page,
+        name: str,
+        node_ids: dict[str, list[str]],
+        error_message: str,
+    ) -> None:
+        node = self._canvas_node_by_ids(page, node_ids.get(name, []))
+        if node is not None:
+            node.dispatch_event("click")
+            return
+
+        # The CLI is authoritative for existence, while this fallback keeps the app usable
+        # if an older LibTV canvas omits data-id from its rendered React Flow node.
+        self._select_canvas_node(page.get_by_text(name, exact=True), error_message)
+
+    def _video_node_ids_by_name(self) -> dict[str, list[str]]:
+        try:
+            completed = subprocess.run(
+                ["libtv", "node", "list", "-p", self.project_id],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=True,
+                timeout=60,
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            payload = json.loads(completed.stdout)
+        except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+            raise MediaProcessError(
+                "无法读取 LibTV 官方节点列表，请确认 LibTV CLI 已登录后重试。"
+            ) from exc
+
+        result: dict[str, list[str]] = {}
+        for node in payload.get("nodes", []):
+            if node.get("type") != "video":
+                continue
+            name = node.get("name")
+            node_id = node.get("id")
+            if isinstance(name, str) and isinstance(node_id, str):
+                result.setdefault(name, []).append(node_id)
+        return result
 
     def _set(
         self,
