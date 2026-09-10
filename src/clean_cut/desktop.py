@@ -329,6 +329,10 @@ class CleanCutApp(tk.Tk):
         ttk.Label(actions, text="集").pack(side="left", padx=(6, 0))
         self.login_button = ttk.Button(actions, text="登录 LibTV", command=self._open_login)
         self.login_button.pack(side="right")
+        self.switch_account_button = ttk.Button(
+            actions, text="切换账号", command=self._switch_account
+        )
+        self.switch_account_button.pack(side="right", padx=(0, 8))
         self.stop_button = ttk.Button(
             actions, text="停止", command=self._request_stop, state="disabled"
         )
@@ -777,9 +781,41 @@ class CleanCutApp(tk.Tk):
         )
 
     def _open_login(self) -> None:
+        self._begin_account_login(switch_account=False)
+
+    def _switch_account(self) -> None:
+        if self._worker and self._worker.is_alive():
+            messagebox.showinfo("任务正在运行", "请先停止当前任务，再切换 LibTV 账号。")
+            return
+        if not messagebox.askyesno(
+            "切换 LibTV 账号",
+            "将打开软件专用的 LibTV 网页。请点击右上角头像，手动退出当前账号，"
+            "再登录新账号。\n"
+            "登录成功后请不要关闭窗口，程序会自动完成 CLI 授权并关闭网页。\n"
+            "本地视频、SRT、清水版和云端画布都不会删除。\n\n"
+            "是否继续？",
+        ):
+            return
+        self._begin_account_login(switch_account=True)
+
+    def _begin_account_login(self, *, switch_account: bool) -> None:
+        if self._worker and self._worker.is_alive():
+            messagebox.showinfo("任务正在运行", "请先停止当前任务，再登录或切换账号。")
+            return
+        self.login_button.configure(state="disabled")
+        self.switch_account_button.configure(state="disabled")
+        self.summary_var.set("正在切换 LibTV 账号" if switch_account else "正在登录 LibTV")
+
         def work() -> None:
             try:
-                info = LibTvWebBatchRunner.login_and_authorize(self._profile_dir())
+                if switch_account:
+                    info = LibTvWebBatchRunner.switch_account_interactively(
+                        self._profile_dir()
+                    )
+                else:
+                    info = LibTvWebBatchRunner.login_and_authorize(
+                        self._profile_dir()
+                    )
                 active = info.get("activeAccount")
                 account_name = (
                     active.get("accountName", "") if isinstance(active, dict) else ""
@@ -788,6 +824,8 @@ class CleanCutApp(tk.Tk):
                 self._events.put(("info", f"LibTV 网页和 CLI 已授权成功{suffix}。"))
             except Exception as exc:
                 self._events.put(("error", str(exc)))
+            finally:
+                self._events.put(("auth_idle", None))
 
         threading.Thread(target=work, daemon=True).start()
 
@@ -835,6 +873,8 @@ class CleanCutApp(tk.Tk):
         self._stop_event.clear()
         self.start_button.configure(state="disabled", text="正在处理…")
         self.stop_button.configure(state="normal")
+        self.login_button.configure(state="disabled")
+        self.switch_account_button.configure(state="disabled")
 
         def work() -> None:
             completed_count = 0
@@ -1400,6 +1440,12 @@ class CleanCutApp(tk.Tk):
             elif kind == "idle":
                 self.start_button.configure(state="normal", text="开始全部任务")
                 self.stop_button.configure(state="disabled")
+                self.login_button.configure(state="normal")
+                self.switch_account_button.configure(state="normal")
+            elif kind == "auth_idle":
+                if not (self._worker and self._worker.is_alive()):
+                    self.login_button.configure(state="normal")
+                    self.switch_account_button.configure(state="normal")
         self.after(150, self._drain_events)
 
 

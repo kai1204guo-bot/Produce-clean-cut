@@ -381,6 +381,52 @@ class LibTvWebBatchRunner:
                 context.close()
 
     @classmethod
+    def switch_account_interactively(cls, profile_dir: Path) -> dict:
+        """Wait for the user to switch accounts in the app-owned visible browser."""
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:
+            raise MediaProcessError("缺少 Playwright，请重新安装桌面版程序。") from exc
+        profile_dir = profile_dir.resolve()
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        with sync_playwright() as playwright:
+            context = playwright.chromium.launch_persistent_context(
+                str(profile_dir), channel="chrome", headless=False, viewport=None
+            )
+            page = context.pages[0] if context.pages else context.new_page()
+            try:
+                original_token = cls._browser_user_token(context)
+                page.goto(LIBTV_HOME_URL, wait_until="domcontentloaded", timeout=120_000)
+                deadline = time.monotonic() + 15 * 60
+                while time.monotonic() < deadline:
+                    if page.is_closed():
+                        raise MediaProcessError("LibTV 窗口已关闭，尚未完成账号切换。")
+                    current_token = cls._browser_user_token(context)
+                    points = page.get_by_role("button", name=re.compile(r"^\d[\d,]*$"))
+                    if (
+                        current_token
+                        and current_token != original_token
+                        and points.count()
+                        and points.first.is_visible()
+                    ):
+                        break
+                    page.wait_for_timeout(500)
+                else:
+                    raise MediaProcessError("等待切换账号超时，请重新点击“切换账号”。")
+                cls._run_libtv_json(["logout"], timeout=120)
+                cls._refresh_cli_login_from_browser(page)
+                return cls.account_info()
+            finally:
+                context.close()
+
+    @staticmethod
+    def _browser_user_token(context) -> str:
+        for cookie in context.cookies([LIBTV_HOME_URL]):
+            if str(cookie.get("name", "")).casefold() == "usertoken":
+                return str(cookie.get("value", ""))
+        return ""
+
+    @classmethod
     def authorize_from_saved_session(cls, profile_dir: Path) -> dict:
         """Refresh an expired CLI credential from the app's saved browser session."""
         try:

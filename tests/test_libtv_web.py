@@ -149,6 +149,17 @@ def test_cloud_concurrency_follows_membership_with_one_spare_slot(
     assert LibTvWebBatchRunner.cloud_concurrency_for_account(payload) == expected
 
 
+def test_browser_user_token_reads_libtv_session_cookie() -> None:
+    context = MagicMock()
+    context.cookies.return_value = [
+        {"name": "other", "value": "ignored"},
+        {"name": "usertoken", "value": "new-account-token"},
+    ]
+
+    assert LibTvWebBatchRunner._browser_user_token(context) == "new-account-token"
+    context.cookies.assert_called_once_with(["https://www.liblib.tv/"])
+
+
 def test_unlimited_membership_does_not_wait_for_cloud_slot(tmp_path: Path) -> None:
     runner = LibTvWebBatchRunner(
         project_url=PROJECT_URL,
