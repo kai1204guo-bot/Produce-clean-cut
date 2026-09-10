@@ -14,7 +14,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from clean_cut.batch import BatchJob, BatchManifest, JobState, chunked, episode_stem
-from clean_cut.errors import MediaProcessError
+from clean_cut.errors import LibTvAuthenticationError, MediaProcessError
 from clean_cut.libtv import detect_opening_cover_frames, restore_opening_cover_frames
 from clean_cut.tools import locate_executable
 
@@ -195,6 +195,28 @@ class LibTvWebBatchRunner:
                 page.wait_for_timeout(1_000)
             context.close()
 
+    def ensure_cli_authorized(self) -> None:
+        """Refresh CLI authorization from the saved LibTV browser session."""
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:
+            raise MediaProcessError("缺少 Playwright，请重新安装桌面版程序。") from exc
+        self.profile_dir.mkdir(parents=True, exist_ok=True)
+        with sync_playwright() as playwright:
+            context = playwright.chromium.launch_persistent_context(
+                str(self.profile_dir),
+                channel="chrome",
+                headless=True,
+                viewport={"width": 1920, "height": 1080},
+            )
+            page = context.pages[0] if context.pages else context.new_page()
+            try:
+                page.goto(self.project_url, wait_until="domcontentloaded", timeout=120_000)
+                self._require_login(page)
+                self._ensure_cli_access(page)
+            finally:
+                context.close()
+
     def _prepare_jobs(
         self, manifest: BatchManifest, clean_dir: Path, skip_existing: bool
     ) -> list[BatchJob]:
@@ -220,7 +242,9 @@ class LibTvWebBatchRunner:
             self._video_node_ids_by_name()
             return
         except MediaProcessError as exc:
-            if not re.search(r"用户未授权|\b10001\b", str(exc)):
+            if not isinstance(exc, LibTvAuthenticationError) and not re.search(
+                r"用户未授权|未登录|\b10001\b|\b401\b", str(exc)
+            ):
                 raise
 
         self._refresh_cli_login_from_browser(page)
@@ -991,6 +1015,10 @@ class LibTvWebBatchRunner:
                 ) from exc
         except subprocess.CalledProcessError as exc:
             detail = (exc.stderr or exc.stdout or str(exc)).strip()
+            if re.search(r"用户未授权|未登录|\b10001\b|\b401\b", detail):
+                raise LibTvAuthenticationError(
+                    "LibTV 登录授权已失效，需要重新登录。"
+                ) from exc
             raise MediaProcessError(f"LibTV CLI 查询失败：{detail[:500]}") from exc
         except (OSError, subprocess.SubprocessError) as exc:
             detail = str(exc).strip() or type(exc).__name__

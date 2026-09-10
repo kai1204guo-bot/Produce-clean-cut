@@ -13,3 +13,6 @@ class MediaProbeError(CleanCutError):
 class MediaProcessError(CleanCutError):
     """ffmpeg could not produce an expected output."""
 
+
+class LibTvAuthenticationError(MediaProcessError):
+    """LibTV CLI authorization is missing or expired."""

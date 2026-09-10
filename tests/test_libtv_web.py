@@ -7,7 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from clean_cut.batch import BatchJob, BatchManifest, JobState
-from clean_cut.errors import MediaProcessError
+from clean_cut.errors import LibTvAuthenticationError, MediaProcessError
 from clean_cut.libtv_web import LibTvWebBatchRunner
 
 PROJECT_ID = "a282f30b20a04d8aac4e32d20f901f73"
@@ -95,6 +95,20 @@ def test_create_project_url_reuses_newest_auto_project() -> None:
 
     assert url.endswith("projectId=newer")
     assert run.call_count == 1
+
+
+def test_cli_unauthorized_has_distinct_error() -> None:
+    error = __import__("subprocess").CalledProcessError(
+        1,
+        ["libtv", "project", "list"],
+        stderr="API Request Error: { code: 10001, msg: '用户未授权' }",
+    )
+
+    with patch("clean_cut.libtv_web.subprocess.run", side_effect=error):
+        with pytest.raises(LibTvAuthenticationError, match="登录授权已失效"):
+            LibTvWebBatchRunner.create_project_url(
+                "BITE CLUB", workspace_id=7887875
+            )
 
 
 def test_video_node_ids_are_grouped_by_exact_name() -> None:

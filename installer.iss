@@ -1,5 +1,5 @@
 #define MyAppName "清水版批量制作"
-#define MyAppVersion "0.2.1"
+#define MyAppVersion "0.2.2"
 #define MyAppPublisher "Produce Clean Cut"
 #define MyAppExeName "清水版批量制作.exe"
 

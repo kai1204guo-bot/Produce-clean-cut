@@ -22,7 +22,7 @@ from clean_cut.batch import (
     episode_stem,
 )
 from clean_cut.dependencies import detect_dependencies, install_dependency
-from clean_cut.errors import CleanCutError
+from clean_cut.errors import CleanCutError, LibTvAuthenticationError
 from clean_cut.libtv_web import LibTvWebBatchRunner
 from clean_cut.paths import app_data_dir
 from clean_cut.series_queue import SeriesQueueStore, SeriesTask, task_from_source
@@ -417,6 +417,7 @@ class CleanCutApp(tk.Tk):
             completed_count = 0
             failed_count = 0
             partial_count = 0
+            authorization_blocked = False
             for task in tasks:
                 if self._stop_event.is_set():
                     break
@@ -437,9 +438,27 @@ class CleanCutApp(tk.Tk):
                     if not task.project_url:
                         task.message = "正在创建或恢复专用 LibTV 画布"
                         self._queue_changed(task, ephemeral)
-                        task.project_url = LibTvWebBatchRunner.create_project_url(
-                            task.name, workspace_id=DEFAULT_WORKSPACE_ID
-                        )
+                        try:
+                            task.project_url = LibTvWebBatchRunner.create_project_url(
+                                task.name, workspace_id=DEFAULT_WORKSPACE_ID
+                            )
+                        except LibTvAuthenticationError:
+                            task.message = "登录授权失效，正在自动恢复"
+                            self._queue_changed(task, ephemeral)
+                            try:
+                                self._make_runner(
+                                    project_url=LOGIN_FALLBACK_URL
+                                ).ensure_cli_authorized()
+                                task.project_url = (
+                                    LibTvWebBatchRunner.create_project_url(
+                                        task.name, workspace_id=DEFAULT_WORKSPACE_ID
+                                    )
+                                )
+                            except Exception as auth_exc:
+                                raise LibTvAuthenticationError(
+                                    "LibTV 登录已失效。请点击“登录 LibTV”完成授权；"
+                                    "登录后再次点击开始，任务会从当前剧继续。"
+                                ) from auth_exc
                     write_text_atomically(
                         clean / PROJECT_URL_FILE, task.project_url.strip() + "\n"
                     )
@@ -495,6 +514,10 @@ class CleanCutApp(tk.Tk):
                         task.state = "completed"
                         task.message = "全部处理完成"
                         completed_count += 1
+                except LibTvAuthenticationError as exc:
+                    task.state = "pending"
+                    task.message = str(exc)
+                    authorization_blocked = True
                 except Exception as exc:
                     if self._stop_event.is_set():
                         task.state = "pending"
@@ -506,8 +529,16 @@ class CleanCutApp(tk.Tk):
                 finally:
                     self._queue_changed(task, ephemeral)
 
+                if authorization_blocked:
+                    break
+
             if self._stop_event.is_set():
                 summary = "队列已安全停止；再次开始会从记录继续。"
+            elif authorization_blocked:
+                summary = (
+                    "队列已暂停：LibTV 登录授权失效。请点击“登录 LibTV”完成授权，"
+                    "然后再次点击开始；未完成剧集仍保留在队列中。"
+                )
             else:
                 summary = (
                     f"多剧队列处理结束：完成 {completed_count} 部，"
