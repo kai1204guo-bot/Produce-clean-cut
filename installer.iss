@@ -1,5 +1,5 @@
 #define MyAppName "清水版批量制作"
-#define MyAppVersion "0.2.0"
+#define MyAppVersion "0.2.1"
 #define MyAppPublisher "Produce Clean Cut"
 #define MyAppExeName "清水版批量制作.exe"
 
@@ -15,7 +15,7 @@ PrivilegesRequired=lowest
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir=installer-dist
-OutputBaseFilename=清水版批量制作-安装程序
+OutputBaseFilename=清水版批量制作-安装程序-v{#MyAppVersion}
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from clean_cut.errors import CleanCutError
+from clean_cut.paths import app_data_dir
 from clean_cut.srt import render_srt
 from clean_cut.subtitle_data import SubtitleCue
 from clean_cut.tools import write_text_atomically
@@ -28,10 +29,7 @@ _CUDA_DLL_NAMES = (
 
 
 def default_cuda_dll_dirs() -> tuple[Path, ...]:
-    local_app_data = os.environ.get("LOCALAPPDATA")
-    if not local_app_data:
-        return ()
-    root = Path(local_app_data) / "ProduceCleanCut" / "cuda-runtime" / "nvidia"
+    root = app_data_dir() / "cuda-runtime" / "nvidia"
     return (
         root / "cuda_runtime" / "bin",
         root / "cublas" / "bin",

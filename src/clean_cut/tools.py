@@ -8,6 +8,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from clean_cut.errors import MediaProcessError, ToolNotFoundError
+from clean_cut.paths import app_data_dir
 
 
 def locate_executable(name: str) -> str | None:
@@ -20,8 +21,7 @@ def locate_executable(name: str) -> str | None:
         candidates.append(local / "Microsoft" / "WinGet" / "Links" / f"{name}.exe")
         if name.casefold() in {"ffmpeg", "ffprobe"}:
             candidates.append(
-                local
-                / "ProduceCleanCut"
+                app_data_dir()
                 / "tools"
                 / "ffmpeg"
                 / "bin"

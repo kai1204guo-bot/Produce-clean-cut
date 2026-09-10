@@ -14,6 +14,7 @@ from pathlib import Path
 
 from clean_cut.asr import _CUDA_DLL_NAMES, default_cuda_dll_dirs
 from clean_cut.errors import CleanCutError
+from clean_cut.paths import app_data_dir
 from clean_cut.tools import locate_executable
 
 ProgressCallback = Callable[[str], None]
@@ -28,11 +29,6 @@ class DependencyInfo:
     installed: bool
     detail: str
     installable: bool = True
-
-
-def app_data_dir() -> Path:
-    base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
-    return base / "ProduceCleanCut"
 
 
 def _chrome_path() -> Path | None:
@@ -160,20 +156,20 @@ def _install_ffmpeg_direct(progress: ProgressCallback) -> None:
     target.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="clean-cut-ffmpeg-") as temporary:
         archive_path = Path(temporary) / "ffmpeg.zip"
-        extract_path = Path(temporary) / "extracted"
         progress("正在从 FFmpeg Windows 构建站下载组件（约 110 MB）…")
         urllib.request.urlretrieve(url, archive_path)
         progress("正在解压 FFmpeg…")
         with zipfile.ZipFile(archive_path) as archive:
-            archive.extractall(extract_path)
-        binaries = {}
-        for name in ("ffmpeg.exe", "ffprobe.exe"):
-            matches = list(extract_path.rglob(name))
-            if len(matches) != 1:
-                raise CleanCutError(f"FFmpeg 安装包结构异常：未找到唯一的 {name}")
-            binaries[name] = matches[0]
-        for name, source in binaries.items():
-            shutil.copy2(source, target / name)
+            for name in ("ffmpeg.exe", "ffprobe.exe"):
+                matches = [
+                    entry
+                    for entry in archive.infolist()
+                    if entry.filename.replace("\\", "/").endswith(f"/bin/{name}")
+                ]
+                if len(matches) != 1:
+                    raise CleanCutError(f"FFmpeg 安装包结构异常：未找到唯一的 {name}")
+                with archive.open(matches[0]) as source, (target / name).open("wb") as output:
+                    shutil.copyfileobj(source, output)
     if not (target / "ffmpeg.exe").is_file() or not (target / "ffprobe.exe").is_file():
         raise CleanCutError("FFmpeg 下载完成，但程序完整性检查未通过。")
 
@@ -262,8 +258,7 @@ def _install_cuda(progress: ProgressCallback) -> None:
 
 def install_dependency(key: str, progress: ProgressCallback = lambda _text: None) -> None:
     if key == "ffmpeg":
-        if not _install_winget("Gyan.FFmpeg", "FFmpeg", progress):
-            _install_ffmpeg_direct(progress)
+        _install_ffmpeg_direct(progress)
     elif key == "chrome":
         if not _install_winget("Google.Chrome", "Google Chrome", progress):
             _install_chrome_direct(progress)

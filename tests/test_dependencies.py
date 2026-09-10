@@ -40,11 +40,8 @@ def test_dependency_detection_marks_required_tools(monkeypatch) -> None:
     assert not statuses["cuda"].required
 
 
-def test_ffmpeg_install_falls_back_when_winget_is_missing() -> None:
-    with (
-        patch("clean_cut.dependencies._install_winget", return_value=False),
-        patch("clean_cut.dependencies._install_ffmpeg_direct") as direct,
-    ):
+def test_ffmpeg_install_uses_direct_download() -> None:
+    with patch("clean_cut.dependencies._install_ffmpeg_direct") as direct:
         install_dependency("ffmpeg")
 
     direct.assert_called_once()

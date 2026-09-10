@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import queue
 import subprocess
 import sys
@@ -25,6 +24,7 @@ from clean_cut.batch import (
 from clean_cut.dependencies import detect_dependencies, install_dependency
 from clean_cut.errors import CleanCutError
 from clean_cut.libtv_web import LibTvWebBatchRunner
+from clean_cut.paths import app_data_dir
 from clean_cut.series_queue import SeriesQueueStore, SeriesTask, task_from_source
 from clean_cut.tools import write_text_atomically
 
@@ -49,7 +49,7 @@ class CleanCutApp(tk.Tk):
         self._rows: dict[str, str] = {}
         self._queue_rows: dict[str, str] = {}
         self._active_series_id = ""
-        self._queue_store = SeriesQueueStore(self._app_data_dir() / "series-queue.json")
+        self._queue_store = SeriesQueueStore(app_data_dir() / "series-queue.json")
         self._series_tasks = self._queue_store.load()
 
         self.source_var = tk.StringVar()
@@ -67,11 +67,6 @@ class CleanCutApp(tk.Tk):
         self._render_queue()
         self.after(150, self._drain_events)
         self.after(700, self._check_dependencies_on_startup)
-
-    @staticmethod
-    def _app_data_dir() -> Path:
-        base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
-        return base / "ProduceCleanCut"
 
     def _configure_style(self) -> None:
         style = ttk.Style(self)
@@ -356,8 +351,7 @@ class CleanCutApp(tk.Tk):
         self.summary_var.set(f"已找到 {len(videos)} 集；将分 {batch_count} 批上传")
 
     def _profile_dir(self) -> Path:
-        base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
-        return base / "ProduceCleanCut" / "libtv-profile"
+        return app_data_dir() / "libtv-profile"
 
     def _make_runner(
         self, callback=None, *, project_url: str | None = None
@@ -697,8 +691,7 @@ class CleanCutApp(tk.Tk):
 
     @staticmethod
     def _write_gpu_error(first_error: Exception, retry_error: Exception) -> None:
-        base = Path(os.environ.get("LOCALAPPDATA", tempfile.gettempdir()))
-        log_path = base / "ProduceCleanCut" / "gpu-error.log"
+        log_path = app_data_dir() / "gpu-error.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         log_path.write_text(
             f"首次错误：{first_error}\n重试错误：{retry_error}\n",
@@ -966,7 +959,7 @@ def main() -> None:
         return
     if "--gpu-smoke-test" in sys.argv:
         source_index = sys.argv.index("--gpu-smoke-test") + 1
-        log_path = Path(os.environ["LOCALAPPDATA"]) / "ProduceCleanCut" / "gpu-test.log"
+        log_path = app_data_dir() / "gpu-test.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             source = Path(sys.argv[source_index])

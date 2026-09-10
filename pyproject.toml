@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "produce-clean-cut"
-version = "0.2.0"
+version = "0.2.1"
 description = "Local pipeline for extracting subtitles and producing clean video copies."
 readme = "README.md"
 requires-python = ">=3.11,<3.14"

@@ -21,4 +21,9 @@ if (-not $compiler) {
 
 & $compiler (Join-Path $projectRoot "installer.iss")
 if ($LASTEXITCODE -ne 0) { throw "安装包构建失败。" }
-Write-Host "安装包已生成：$(Join-Path $projectRoot 'installer-dist\清水版批量制作-安装程序.exe')"
+$result = Get-ChildItem -LiteralPath (Join-Path $projectRoot "installer-dist") `
+    -Filter "清水版批量制作-安装程序-v*.exe" |
+    Sort-Object LastWriteTime -Descending |
+    Select-Object -First 1
+if (-not $result) { throw "安装包编译结束，但没有找到版本化安装文件。" }
+Write-Host "安装包已生成：$($result.FullName)"
