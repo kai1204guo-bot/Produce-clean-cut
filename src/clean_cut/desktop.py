@@ -722,7 +722,8 @@ class CleanCutApp(tk.Tk):
     def _open_dependency_center(self) -> None:
         window = tk.Toplevel(self)
         window.title("运行环境检测与一键安装")
-        window.geometry("820x430")
+        window.geometry("900x600")
+        window.minsize(760, 520)
         window.transient(self)
         frame = ttk.Frame(window, padding=18)
         frame.pack(fill="both", expand=True)
@@ -735,7 +736,7 @@ class CleanCutApp(tk.Tk):
             frame,
             columns=("name", "required", "state", "detail"),
             show="headings",
-            height=10,
+            height=7,
         )
         for column, title, width in (
             ("name", "组件", 190),
@@ -745,13 +746,13 @@ class CleanCutApp(tk.Tk):
         ):
             tree.heading(column, text=title)
             tree.column(column, width=width, anchor="w")
-        tree.pack(fill="both", expand=True)
         status_var = tk.StringVar(value="检测完成")
-        ttk.Label(frame, textvariable=status_var, style="Muted.TLabel").pack(
-            anchor="w", pady=(8, 4)
-        )
         actions = ttk.Frame(frame)
-        actions.pack(fill="x")
+        actions.pack(side="bottom", fill="x", pady=(8, 0))
+        ttk.Label(frame, textvariable=status_var, style="Muted.TLabel").pack(
+            side="bottom", anchor="w", pady=(8, 0)
+        )
+        tree.pack(fill="both", expand=True)
 
         def refresh() -> list:
             for item in tree.get_children():
@@ -820,7 +821,7 @@ class CleanCutApp(tk.Tk):
 
         install_required = ttk.Button(
             actions,
-            text="一键安装全部必需项",
+            text="一键安装缺失必需项",
             style="Primary.TButton",
             command=install_all_required,
         )
