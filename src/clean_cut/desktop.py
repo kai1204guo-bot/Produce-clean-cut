@@ -35,11 +35,6 @@ from clean_cut.series_queue import (
 from clean_cut.tools import write_text_atomically
 
 PROJECT_URL_FILE = ".clean-cut-project-url.txt"
-DEFAULT_WORKSPACE_ID = 7887875
-LOGIN_FALLBACK_URL = (
-    "https://www.liblib.tv/canvas?"
-    "spaceId=7887875&projectId=a282f30b20a04d8aac4e32d20f901f73"
-)
 UI_FONT = "Microsoft YaHei UI"
 
 
@@ -784,10 +779,13 @@ class CleanCutApp(tk.Tk):
     def _open_login(self) -> None:
         def work() -> None:
             try:
-                self._make_runner(
-                    project_url=self.project_var.get().strip() or LOGIN_FALLBACK_URL
-                ).open_login()
-                self._events.put(("info", "LibTV 登录窗口已关闭，登录状态会保留。"))
+                info = LibTvWebBatchRunner.login_and_authorize(self._profile_dir())
+                active = info.get("activeAccount")
+                account_name = (
+                    active.get("accountName", "") if isinstance(active, dict) else ""
+                )
+                suffix = f"：{account_name}" if account_name else ""
+                self._events.put(("info", f"LibTV 网页和 CLI 已授权成功{suffix}。"))
             except Exception as exc:
                 self._events.put(("error", str(exc)))
 
@@ -862,30 +860,29 @@ class CleanCutApp(tk.Tk):
                         clean / ".clean-cut-state.json", videos
                     )
                     self._activate_series(task, videos)
-                    if not task.project_url:
-                        task.message = "正在创建或恢复专用 LibTV 画布"
+                    task.message = "正在验证当前 LibTV 账号并恢复专用画布"
+                    self._queue_changed(task, ephemeral)
+                    try:
+                        account_info = LibTvWebBatchRunner.account_info()
+                        task.project_url = LibTvWebBatchRunner.prepare_project_url(
+                            task.name, task.project_url
+                        )
+                    except LibTvAuthenticationError:
+                        task.message = "CLI 授权失效，正在从已保存的网页登录恢复"
                         self._queue_changed(task, ephemeral)
                         try:
-                            task.project_url = LibTvWebBatchRunner.create_project_url(
-                                task.name, workspace_id=DEFAULT_WORKSPACE_ID
+                            LibTvWebBatchRunner.authorize_from_saved_session(
+                                self._profile_dir()
                             )
-                        except LibTvAuthenticationError:
-                            task.message = "登录授权失效，正在自动恢复"
-                            self._queue_changed(task, ephemeral)
-                            try:
-                                self._make_runner(
-                                    project_url=LOGIN_FALLBACK_URL
-                                ).ensure_cli_authorized()
-                                task.project_url = (
-                                    LibTvWebBatchRunner.create_project_url(
-                                        task.name, workspace_id=DEFAULT_WORKSPACE_ID
-                                    )
-                                )
-                            except Exception as auth_exc:
-                                raise LibTvAuthenticationError(
-                                    "LibTV 登录已失效。请点击“登录 LibTV”完成授权；"
-                                    "登录后再次点击开始，任务会从当前剧继续。"
-                                ) from auth_exc
+                            account_info = LibTvWebBatchRunner.account_info()
+                            task.project_url = LibTvWebBatchRunner.prepare_project_url(
+                                task.name, task.project_url
+                            )
+                        except Exception as auth_exc:
+                            raise LibTvAuthenticationError(
+                                "LibTV 登录已失效。请点击“登录 LibTV”完成网页和 CLI 授权；"
+                                "登录后再次点击开始，任务会从当前剧继续。"
+                            ) from auth_exc
                     write_text_atomically(
                         clean / PROJECT_URL_FILE, task.project_url.strip() + "\n"
                     )
@@ -898,6 +895,11 @@ class CleanCutApp(tk.Tk):
                         project_url=task.project_url,
                         profile_dir=self._profile_dir(),
                         batch_size=batch_size,
+                        max_cloud_concurrency=(
+                            LibTvWebBatchRunner.cloud_concurrency_for_account(
+                                account_info
+                            )
+                        ),
                         status_callback=callback,
                         stop_requested=self._stop_event.is_set,
                     )

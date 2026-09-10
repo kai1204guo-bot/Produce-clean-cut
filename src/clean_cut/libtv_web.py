@@ -24,6 +24,8 @@ from clean_cut.segmentation import (
 from clean_cut.tools import locate_executable
 
 StatusCallback = Callable[[BatchJob], None]
+LIBTV_HOME_URL = "https://www.liblib.tv/"
+AUTO_PROJECT_DESCRIPTION = "清水版批量制作自动创建"
 
 
 class LibTvWebBatchRunner:
@@ -35,7 +37,7 @@ class LibTvWebBatchRunner:
         project_url: str,
         profile_dir: Path,
         batch_size: int = 15,
-        max_cloud_concurrency: int = 7,
+        max_cloud_concurrency: int | None = 7,
         max_job_retries: int = 5,
         status_callback: StatusCallback | None = None,
         stop_requested: Callable[[], bool] | None = None,
@@ -49,7 +51,11 @@ class LibTvWebBatchRunner:
         self.project_id = project_ids[0]
         self.profile_dir = profile_dir.resolve()
         self.batch_size = batch_size
-        self.max_cloud_concurrency = max_cloud_concurrency
+        self.max_cloud_concurrency = (
+            None
+            if max_cloud_concurrency is None
+            else max(1, max_cloud_concurrency)
+        )
         self.max_job_retries = max(1, max_job_retries)
         self.status_callback = status_callback or (lambda _job: None)
         self.stop_requested = stop_requested or (lambda: False)
@@ -60,7 +66,11 @@ class LibTvWebBatchRunner:
         self._children_by_parent: dict[str, list[BatchJob]] = {}
 
     @classmethod
-    def create_project_url(cls, name: str, *, workspace_id: int) -> str:
+    def create_project_url(
+        cls, name: str, *, workspace_id: int | None = None
+    ) -> str:
+        """Create/reuse a canvas owned by the currently active LibTV account."""
+        workspace_id = 0 if workspace_id is None else workspace_id
         existing_id = cls._find_auto_project(name, workspace_id=workspace_id)
         if existing_id:
             return cls._format_project_url(existing_id, workspace_id=workspace_id)
@@ -70,7 +80,7 @@ class LibTvWebBatchRunner:
                 "create",
                 name,
                 "-d",
-                "清水版批量制作自动创建",
+                AUTO_PROJECT_DESCRIPTION,
                 "-w",
                 str(workspace_id),
             ],
@@ -85,6 +95,8 @@ class LibTvWebBatchRunner:
 
     @staticmethod
     def _format_project_url(project_id: str, *, workspace_id: int) -> str:
+        if workspace_id == 0:
+            return f"https://www.liblib.tv/canvas?projectId={project_id}"
         return (
             "https://www.liblib.tv/canvas?"
             f"spaceId={workspace_id}&projectId={project_id}"
@@ -129,9 +141,8 @@ class LibTvWebBatchRunner:
             for item in projects
             if isinstance(item, dict)
             and item.get("name") == name
-            and item.get("description") == "清水版批量制作自动创建"
-            and str(item.get("projectSpaceId") or item.get("folderId"))
-            == str(workspace_id)
+            and item.get("description") == AUTO_PROJECT_DESCRIPTION
+            and cls._project_workspace_id(item) == workspace_id
         ]
         matches.sort(
             key=lambda item: int(item.get("updatedAtMs") or item.get("createdAtMs") or 0),
@@ -142,6 +153,63 @@ class LibTvWebBatchRunner:
             if project_id:
                 return project_id
         return ""
+
+    @staticmethod
+    def _project_workspace_id(item: dict) -> int:
+        value = item.get("projectSpaceId")
+        if value is None:
+            value = item.get("folderId")
+        try:
+            return int(value or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    @classmethod
+    def account_info(cls) -> dict:
+        """Return the account currently authorized in the official CLI."""
+        return cls._run_libtv_json(["account", "info"], timeout=120)
+
+    @staticmethod
+    def cloud_concurrency_for_account(account_info: dict) -> int | None:
+        """Keep one official task slot free; None means an unlimited membership."""
+        active = account_info.get("activeAccount")
+        member = active.get("memberAccount") if isinstance(active, dict) else None
+        member_name = member.get("memberName", "") if isinstance(member, dict) else ""
+        normalized = str(member_name).replace(" ", "")
+        if "豪华版" in normalized or "至尊版" in normalized:
+            return None
+        if "高级版" in normalized:
+            return 19
+        if "进阶版" in normalized:
+            return 11
+        if "标准版" in normalized:
+            return 7
+        # Unknown, expired, or future plans retain the proven conservative value.
+        return 7
+
+    @classmethod
+    def prepare_project_url(cls, name: str, saved_url: str = "") -> str:
+        """Reuse an accessible saved canvas or create one for the active account."""
+        cls.account_info()
+        project_id = cls._project_id_from_url(saved_url)
+        if project_id:
+            try:
+                cls._run_libtv_json(["project", project_id], timeout=120)
+            except MediaProcessError:
+                pass
+            else:
+                return saved_url
+        return cls.create_project_url(name)
+
+    @staticmethod
+    def _project_id_from_url(project_url: str) -> str:
+        if not project_url:
+            return ""
+        project_ids = parse_qs(urlparse(project_url).query).get("projectId", [])
+        if len(project_ids) != 1:
+            return ""
+        project_id = project_ids[0]
+        return project_id if re.fullmatch(r"[A-Za-z0-9_-]+", project_id) else ""
 
     def run(
         self,
@@ -281,26 +349,61 @@ class LibTvWebBatchRunner:
             self._set(manifest, parent, JobState.COMPLETE, "分段合并处理完成", 100)
             discard_segment_sources(children)
 
-    def open_login(self) -> None:
+    @classmethod
+    def login_and_authorize(cls, profile_dir: Path) -> dict:
+        """Let the user log in, then bind the official CLI to that same account."""
         try:
             from playwright.sync_api import sync_playwright
         except ImportError as exc:
             raise MediaProcessError("缺少 Playwright，请重新安装桌面版程序。") from exc
-        self.profile_dir.mkdir(parents=True, exist_ok=True)
+        profile_dir = profile_dir.resolve()
+        profile_dir.mkdir(parents=True, exist_ok=True)
         with sync_playwright() as playwright:
             context = playwright.chromium.launch_persistent_context(
-                str(self.profile_dir), channel="chrome", headless=False, viewport=None
+                str(profile_dir), channel="chrome", headless=False, viewport=None
             )
             page = context.pages[0] if context.pages else context.new_page()
-            page.goto(self.project_url, wait_until="domcontentloaded", timeout=120_000)
-            deadline = time.monotonic() + 15 * 60
-            while time.monotonic() < deadline:
-                if page.is_closed():
-                    break
-                if page.get_by_role("button", name=re.compile(r"^\d[\d,]*$")).count():
-                    break
-                page.wait_for_timeout(1_000)
-            context.close()
+            try:
+                page.goto(LIBTV_HOME_URL, wait_until="domcontentloaded", timeout=120_000)
+                deadline = time.monotonic() + 15 * 60
+                while time.monotonic() < deadline:
+                    if page.is_closed():
+                        raise MediaProcessError("LibTV 登录窗口已关闭，尚未完成授权。")
+                    points = page.get_by_role("button", name=re.compile(r"^\d[\d,]*$"))
+                    if points.count() and points.first.is_visible():
+                        break
+                    page.wait_for_timeout(1_000)
+                else:
+                    raise MediaProcessError("等待 LibTV 登录超时，请重新点击“登录 LibTV”。")
+                cls._refresh_cli_login_from_browser(page)
+                return cls.account_info()
+            finally:
+                context.close()
+
+    @classmethod
+    def authorize_from_saved_session(cls, profile_dir: Path) -> dict:
+        """Refresh an expired CLI credential from the app's saved browser session."""
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError as exc:
+            raise MediaProcessError("缺少 Playwright，请重新安装桌面版程序。") from exc
+        profile_dir = profile_dir.resolve()
+        profile_dir.mkdir(parents=True, exist_ok=True)
+        with sync_playwright() as playwright:
+            context = playwright.chromium.launch_persistent_context(
+                str(profile_dir),
+                channel="chrome",
+                headless=True,
+                viewport={"width": 1920, "height": 1080},
+            )
+            page = context.pages[0] if context.pages else context.new_page()
+            try:
+                page.goto(LIBTV_HOME_URL, wait_until="domcontentloaded", timeout=120_000)
+                cls._require_login(page)
+                cls._refresh_cli_login_from_browser(page)
+                return cls.account_info()
+            finally:
+                context.close()
 
     def ensure_cli_authorized(self) -> None:
         """Refresh CLI authorization from the saved LibTV browser session."""
@@ -343,7 +446,8 @@ class LibTvWebBatchRunner:
                 pending.append(job)
         return pending
 
-    def _require_login(self, page) -> None:
+    @staticmethod
+    def _require_login(page) -> None:
         points = page.get_by_role("button", name=re.compile(r"^\d[\d,]*$"))
         login = page.get_by_role("button", name="注册/登录")
         points.or_(login).first.wait_for(state="visible", timeout=120_000)
@@ -371,7 +475,8 @@ class LibTvWebBatchRunner:
                 "使用的是同一个账号，然后重新运行。"
             ) from exc
 
-    def _refresh_cli_login_from_browser(self, page) -> None:
+    @staticmethod
+    def _refresh_cli_login_from_browser(page) -> None:
         process = subprocess.Popen(
             [locate_executable("libtv") or "libtv", "login", "web"],
             stdout=subprocess.PIPE,
@@ -908,6 +1013,8 @@ class LibTvWebBatchRunner:
         jobs: list[BatchJob],
         clean_dir: Path,
     ) -> None:
+        if self.max_cloud_concurrency is None:
+            return
         while True:
             self._check_stop()
             self._download_one_ready_output(context, manifest, jobs, clean_dir)

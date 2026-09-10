@@ -67,6 +67,103 @@ def test_create_project_url_uses_requested_workspace() -> None:
     ]
 
 
+def test_create_project_url_defaults_to_active_account_root() -> None:
+    empty_list = type("Completed", (), {"stdout": json.dumps({"projectMetaList": []})})()
+    created = type(
+        "Completed",
+        (),
+        {"stdout": json.dumps({"data": {"uuid": "portable-project"}})},
+    )()
+
+    with patch(
+        "clean_cut.libtv_web.subprocess.run", side_effect=[empty_list, created]
+    ) as run:
+        url = LibTvWebBatchRunner.create_project_url("OTHER ACCOUNT")
+
+    assert url == "https://www.liblib.tv/canvas?projectId=portable-project"
+    assert run.call_args_list[0].args[0][0:4] == [
+        "libtv",
+        "project",
+        "list",
+        "-w",
+    ]
+    assert run.call_args_list[0].args[0][4] == "0"
+    assert run.call_args_list[1].args[0][-2:] == ["-w", "0"]
+
+
+def test_prepare_project_url_keeps_canvas_accessible_to_active_account() -> None:
+    account = type("Completed", (), {"stdout": json.dumps({"activeAccount": {}})})()
+    project = type("Completed", (), {"stdout": json.dumps({"nodes": []})})()
+
+    with patch(
+        "clean_cut.libtv_web.subprocess.run", side_effect=[account, project]
+    ) as run:
+        result = LibTvWebBatchRunner.prepare_project_url("SHOW", PROJECT_URL)
+
+    assert result == PROJECT_URL
+    assert run.call_args_list[0].args[0] == ["libtv", "account", "info"]
+    assert run.call_args_list[1].args[0] == ["libtv", "project", PROJECT_ID]
+
+
+def test_prepare_project_url_replaces_canvas_from_another_account() -> None:
+    account = type("Completed", (), {"stdout": json.dumps({"activeAccount": {}})})()
+    inaccessible = __import__("subprocess").CalledProcessError(
+        1,
+        ["libtv", "project", PROJECT_ID],
+        stderr="API Request Error: { code: 10001, msg: '用户未授权' }",
+    )
+    empty_list = type("Completed", (), {"stdout": json.dumps({"projectMetaList": []})})()
+    created = type(
+        "Completed",
+        (),
+        {"stdout": json.dumps({"uuid": "new-account-project"})},
+    )()
+
+    with patch(
+        "clean_cut.libtv_web.subprocess.run",
+        side_effect=[account, inaccessible, empty_list, created],
+    ):
+        result = LibTvWebBatchRunner.prepare_project_url("SHOW", PROJECT_URL)
+
+    assert result == "https://www.liblib.tv/canvas?projectId=new-account-project"
+
+
+@pytest.mark.parametrize(
+    ("member_name", "expected"),
+    [
+        ("标准版VIP 连续包月", 7),
+        ("进阶版VIP", 11),
+        ("高级版", 19),
+        ("豪华版VIP", None),
+        ("至尊版", None),
+        ("未知套餐", 7),
+    ],
+)
+def test_cloud_concurrency_follows_membership_with_one_spare_slot(
+    member_name: str, expected: int | None
+) -> None:
+    payload = {
+        "activeAccount": {"memberAccount": {"memberName": member_name}}
+    }
+
+    assert LibTvWebBatchRunner.cloud_concurrency_for_account(payload) == expected
+
+
+def test_unlimited_membership_does_not_wait_for_cloud_slot(tmp_path: Path) -> None:
+    runner = LibTvWebBatchRunner(
+        project_url=PROJECT_URL,
+        profile_dir=tmp_path / "profile",
+        max_cloud_concurrency=None,
+    )
+    job = BatchJob(source=str(tmp_path / "EP1.mp4"), episode=1)
+    manifest = BatchManifest(tmp_path / "state.json", [job])
+
+    with patch.object(runner, "_active_cloud_task_count") as count:
+        runner._wait_for_cloud_slot(object(), object(), manifest, job, [job], tmp_path)
+
+    count.assert_not_called()
+
+
 def test_create_project_url_reuses_newest_auto_project() -> None:
     projects = {
         "projectMetaList": [
