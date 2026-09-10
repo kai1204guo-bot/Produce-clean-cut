@@ -386,3 +386,101 @@ def test_non_json_cli_error_keeps_official_message() -> None:
         pytest.raises(MediaProcessError, match="视频审核未通过"),
     ):
         LibTvWebBatchRunner._run_libtv_json(["upload"], timeout=1)
+
+
+def test_missing_completed_output_is_queued_again(tmp_path: Path) -> None:
+    runner = make_runner()
+    job = BatchJob(
+        source=str(tmp_path / "EP1.mp4"),
+        episode=1,
+        state=JobState.COMPLETE,
+        clean_output=str(tmp_path / "EP1-清水版.mp4"),
+    )
+    manifest = BatchManifest(tmp_path / "state.json", [job])
+
+    pending = runner._prepare_jobs(manifest, tmp_path, skip_existing=True)
+
+    assert pending == [job]
+    assert job.state is JobState.PENDING
+    assert job.message == "成品缺失，重新处理"
+
+
+def test_segment_progress_is_reported_on_parent_row(tmp_path: Path) -> None:
+    parent = BatchJob(source=str(tmp_path / "EP1.mp4"), episode=1)
+    first = BatchJob(
+        source=str(tmp_path / "segment-a.mp4"),
+        episode=None,
+        parent_source=parent.source,
+        segment_index=1,
+        segment_count=2,
+        state=JobState.COMPLETE,
+        progress=100,
+    )
+    second = BatchJob(
+        source=str(tmp_path / "segment-b.mp4"),
+        episode=None,
+        parent_source=parent.source,
+        segment_index=2,
+        segment_count=2,
+        state=JobState.GENERATING,
+        progress=40,
+        message="生成中 40%",
+    )
+    parent_manifest = BatchManifest(tmp_path / "parent.json", [parent])
+    callback = MagicMock()
+    runner = LibTvWebBatchRunner(
+        project_url=PROJECT_URL,
+        profile_dir=tmp_path / "profile",
+        status_callback=callback,
+    )
+    runner._parent_manifest = parent_manifest
+    runner._parents_by_key = {parent.key: parent}
+    runner._children_by_parent = {parent.key: [first, second]}
+
+    runner._sync_parent_status(second)
+
+    assert parent.state is JobState.GENERATING
+    assert parent.progress == 70
+    assert "分段 2/2" in parent.message
+    assert "已完成 1/2" in parent.message
+    callback.assert_called_once_with(parent)
+
+
+def test_completed_segments_are_merged_once_for_parent(tmp_path: Path) -> None:
+    source = tmp_path / "EP1.mp4"
+    source.touch()
+    parent = BatchJob(source=str(source), episode=1)
+    children = []
+    for index in (1, 2):
+        clean = tmp_path / f"segment-{index}-clean.mp4"
+        clean.touch()
+        children.append(
+            BatchJob(
+                source=str(tmp_path / f"segment-{index}.mp4"),
+                episode=None,
+                clean_output=str(clean),
+                parent_source=str(source),
+                segment_index=index,
+                segment_count=2,
+                state=JobState.COMPLETE,
+                progress=100,
+            )
+        )
+    manifest = BatchManifest(tmp_path / "parent.json", [parent])
+    runner = make_runner()
+    runner._children_by_parent = {parent.key: children}
+
+    with (
+        patch("clean_cut.libtv_web.merge_libtv_segments") as merge,
+        patch("clean_cut.libtv_web.discard_segment_sources") as discard,
+    ):
+        runner._finalize_parent_jobs(manifest, [parent], tmp_path)
+
+    merge.assert_called_once_with(
+        source,
+        children,
+        tmp_path / "EP1-清水版.mp4",
+    )
+    discard.assert_called_once_with(children)
+    assert parent.state is JobState.COMPLETE
+    assert parent.progress == 100

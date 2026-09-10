@@ -97,7 +97,10 @@ class CleanCutApp(tk.Tk):
         ttk.Label(root, text="清水版批量制作", style="Title.TLabel").pack(anchor="w")
         ttk.Label(
             root,
-            text="支持多部剧排队无人值守；逐集生成、立即下载并恢复封面。",
+            text=(
+                "支持多部剧排队无人值守；超过 60 秒自动均匀分段，"
+                "完成后无缝合并并恢复封面。"
+            ),
             style="Muted.TLabel",
         ).pack(anchor="w", pady=(4, 10))
 

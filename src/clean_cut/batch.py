@@ -81,6 +81,13 @@ class BatchJob:
     message: str = "等待处理"
     clean_output: str | None = None
     srt_output: str | None = None
+    parent_source: str | None = None
+    segment_index: int | None = None
+    segment_count: int | None = None
+    segment_core_start: float | None = None
+    segment_core_end: float | None = None
+    segment_input_start: float | None = None
+    segment_input_end: float | None = None
 
     @property
     def source_path(self) -> Path:
@@ -89,6 +96,15 @@ class BatchJob:
     @property
     def key(self) -> str:
         return str(self.source_path.resolve()).casefold()
+
+    @property
+    def is_segment(self) -> bool:
+        return bool(self.parent_source and (self.segment_count or 0) > 1)
+
+    @property
+    def parent_key(self) -> str:
+        source = self.parent_source or self.source
+        return str(Path(source).resolve()).casefold()
 
 
 class BatchManifest:
@@ -99,6 +115,16 @@ class BatchManifest:
 
     @classmethod
     def load_or_create(cls, path: Path, videos: Iterable[Path]) -> BatchManifest:
+        jobs = [
+            BatchJob(source=str(video.resolve()), episode=episode_number(video))
+            for video in videos
+        ]
+        return cls.load_or_create_jobs(path, jobs)
+
+    @classmethod
+    def load_or_create_jobs(
+        cls, path: Path, requested_jobs: Iterable[BatchJob]
+    ) -> BatchManifest:
         existing: dict[str, dict[str, object]] = {}
         if path.exists():
             payload = json.loads(path.read_text(encoding="utf-8"))
@@ -109,17 +135,31 @@ class BatchManifest:
             }
 
         jobs: list[BatchJob] = []
-        for video in videos:
-            key = str(video.resolve()).casefold()
+        for requested in requested_jobs:
+            key = requested.key
             item = existing.get(key)
             if item:
                 try:
                     item["state"] = JobState(str(item.get("state", JobState.PENDING)))
-                    jobs.append(BatchJob(**item))
+                    restored = BatchJob(**item)
+                    for field in (
+                        "source",
+                        "episode",
+                        "clean_output",
+                        "parent_source",
+                        "segment_index",
+                        "segment_count",
+                        "segment_core_start",
+                        "segment_core_end",
+                        "segment_input_start",
+                        "segment_input_end",
+                    ):
+                        setattr(restored, field, getattr(requested, field))
+                    jobs.append(restored)
                     continue
                 except (TypeError, ValueError):
                     pass
-            jobs.append(BatchJob(source=str(video.resolve()), episode=episode_number(video)))
+            jobs.append(requested)
         manifest = cls(path, jobs)
         manifest.save()
         return manifest

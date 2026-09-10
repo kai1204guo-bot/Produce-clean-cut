@@ -16,6 +16,11 @@ from urllib.parse import parse_qs, urlparse
 from clean_cut.batch import BatchJob, BatchManifest, JobState, chunked, episode_stem
 from clean_cut.errors import LibTvAuthenticationError, MediaProcessError
 from clean_cut.libtv import detect_opening_cover_frames, restore_opening_cover_frames
+from clean_cut.segmentation import (
+    discard_segment_sources,
+    merge_libtv_segments,
+    split_for_libtv,
+)
 from clean_cut.tools import locate_executable
 
 StatusCallback = Callable[[BatchJob], None]
@@ -49,6 +54,10 @@ class LibTvWebBatchRunner:
         self.status_callback = status_callback or (lambda _job: None)
         self.stop_requested = stop_requested or (lambda: False)
         self.last_failed_jobs: list[str] = []
+        self._parent_manifest: BatchManifest | None = None
+        self._work_manifest: BatchManifest | None = None
+        self._parents_by_key: dict[str, BatchJob] = {}
+        self._children_by_parent: dict[str, list[BatchJob]] = {}
 
     @classmethod
     def create_project_url(cls, name: str, *, workspace_id: int) -> str:
@@ -149,6 +158,20 @@ class LibTvWebBatchRunner:
 
         self.profile_dir.mkdir(parents=True, exist_ok=True)
         clean_dir.mkdir(parents=True, exist_ok=True)
+        parents = self._prepare_jobs(manifest, clean_dir, skip_existing)
+        if not parents:
+            return
+        work_root = clean_dir / ".clean-cut-segments"
+        work_jobs = self._prepare_segment_jobs(manifest, parents, clean_dir, work_root)
+        work_manifest = BatchManifest.load_or_create_jobs(
+            work_root / "state.json", work_jobs
+        )
+        self._parent_manifest = manifest
+        self._work_manifest = work_manifest
+        self._parents_by_key = {job.key: job for job in parents}
+        self._children_by_parent = {}
+        for job in work_manifest.jobs.values():
+            self._children_by_parent.setdefault(job.parent_key, []).append(job)
         with sync_playwright() as playwright:
             context = playwright.chromium.launch_persistent_context(
                 str(self.profile_dir),
@@ -161,18 +184,102 @@ class LibTvWebBatchRunner:
                 page.goto(self.project_url, wait_until="domcontentloaded", timeout=120_000)
                 self._require_login(page)
                 self._ensure_cli_access(page)
-                pending = self._prepare_jobs(manifest, clean_dir, skip_existing)
-                self._upload_all(page, manifest, pending)
+                pending = self._prepare_jobs(work_manifest, work_root, True)
+                self._upload_all(page, work_manifest, pending)
                 upload_failures = [job for job in pending if job.state == JobState.ERROR]
                 ready = [job for job in pending if job.state != JobState.ERROR]
-                self._submit_all(page, context, manifest, ready, clean_dir)
-                self._wait_and_download(page, context, manifest, ready, clean_dir)
-                self.last_failed_jobs = [
-                    f"EP{job.episode}" if job.episode is not None else job.source_path.name
-                    for job in upload_failures
-                ] + self.last_failed_jobs
+                self._submit_all(page, context, work_manifest, ready, work_root)
+                self._wait_and_download(page, context, work_manifest, ready, work_root)
+                for job in upload_failures:
+                    self._sync_parent_status(job)
             finally:
                 context.close()
+        self._finalize_parent_jobs(manifest, parents, clean_dir)
+        self.last_failed_jobs = [
+            f"EP{job.episode}" if job.episode is not None else job.source_path.name
+            for job in parents
+            if job.state == JobState.ERROR
+        ]
+
+    def _prepare_segment_jobs(
+        self,
+        manifest: BatchManifest,
+        parents: list[BatchJob],
+        clean_dir: Path,
+        work_root: Path,
+    ) -> list[BatchJob]:
+        jobs: list[BatchJob] = []
+        for parent in parents:
+            self._set(manifest, parent, JobState.PENDING, "正在计算安全分段", 0)
+            children = split_for_libtv(parent.source_path, work_root)
+            final_output = clean_dir / f"{episode_stem(parent.source_path)}-清水版.mp4"
+            parent.clean_output = str(final_output)
+            if len(children) == 1:
+                children[0].clean_output = str(final_output)
+            else:
+                self._set(
+                    manifest,
+                    parent,
+                    JobState.PENDING,
+                    f"已均分为 {len(children)} 段，每段不超过 58 秒",
+                    0,
+                )
+            jobs.extend(children)
+        manifest.save()
+        return jobs
+
+    def _finalize_parent_jobs(
+        self,
+        manifest: BatchManifest,
+        parents: list[BatchJob],
+        clean_dir: Path,
+    ) -> None:
+        for parent in parents:
+            children = self._children_by_parent.get(parent.key, [])
+            failed = [child for child in children if child.state == JobState.ERROR]
+            unfinished = [
+                child
+                for child in children
+                if child.state not in {JobState.COMPLETE, JobState.SKIPPED, JobState.ERROR}
+            ]
+            if failed or unfinished:
+                detail = failed[0].message if failed else "仍有分段未完成"
+                self._set(
+                    manifest,
+                    parent,
+                    JobState.ERROR,
+                    f"分段任务未完成，可继续重试：{detail}",
+                    parent.progress,
+                )
+                continue
+            if len(children) == 1:
+                child = children[0]
+                parent.clean_output = child.clean_output
+                state = JobState.SKIPPED if child.state == JobState.SKIPPED else JobState.COMPLETE
+                self._set(manifest, parent, state, "处理完成", 100)
+                continue
+            output = clean_dir / f"{episode_stem(parent.source_path)}-清水版.mp4"
+            try:
+                self._set(
+                    manifest,
+                    parent,
+                    JobState.RESTORING_COVER,
+                    f"{len(children)} 段已完成，正在无缝合并并恢复封面",
+                    99,
+                )
+                merge_libtv_segments(parent.source_path, children, output)
+            except Exception as exc:
+                self._set(
+                    manifest,
+                    parent,
+                    JobState.ERROR,
+                    f"清水分段已保留，合并失败可重试：{exc}",
+                    99,
+                )
+                continue
+            parent.clean_output = str(output)
+            self._set(manifest, parent, JobState.COMPLETE, "分段合并处理完成", 100)
+            discard_segment_sources(children)
 
     def open_login(self) -> None:
         try:
@@ -222,11 +329,17 @@ class LibTvWebBatchRunner:
     ) -> list[BatchJob]:
         pending: list[BatchJob] = []
         for job in manifest.jobs.values():
-            output = clean_dir / f"{episode_stem(job.source_path)}-清水版.mp4"
+            output = (
+                Path(job.clean_output)
+                if job.clean_output
+                else clean_dir / f"{episode_stem(job.source_path)}-清水版.mp4"
+            )
             job.clean_output = str(output)
             if skip_existing and output.exists() and output.stat().st_size > 0:
                 self._set(manifest, job, JobState.SKIPPED, "成品已存在，已跳过", 100)
-            elif job.state not in {JobState.COMPLETE, JobState.SKIPPED}:
+            else:
+                if job.state in {JobState.COMPLETE, JobState.SKIPPED}:
+                    self._set(manifest, job, JobState.PENDING, "成品缺失，重新处理", 0)
                 pending.append(job)
         return pending
 
@@ -649,7 +762,12 @@ class LibTvWebBatchRunner:
         media_url: str,
     ) -> None:
         self._set(manifest, job, JobState.DOWNLOADING, "正在下载清水版")
-        output = clean_dir / f"{episode_stem(job.source_path)}-清水版.mp4"
+        output = (
+            Path(job.clean_output)
+            if job.clean_output
+            else clean_dir / f"{episode_stem(job.source_path)}-清水版.mp4"
+        )
+        output.parent.mkdir(parents=True, exist_ok=True)
         cookies = context.cookies([media_url])
         cookie_header = "; ".join(f"{item['name']}={item['value']}" for item in cookies)
         headers = {"User-Agent": "Mozilla/5.0"}
@@ -663,6 +781,13 @@ class LibTvWebBatchRunner:
                 while block := response.read(1024 * 1024):
                     self._check_stop()
                     target.write(block)
+            if job.is_segment:
+                if output.exists():
+                    output.unlink()
+                shutil.move(str(raw), output)
+                job.clean_output = str(output)
+                self._set(manifest, job, JobState.COMPLETE, "清水分段下载完成", 100)
+                return
             frame_count = detect_opening_cover_frames(job.source_path)
             self._set(
                 manifest,
@@ -1036,7 +1161,36 @@ class LibTvWebBatchRunner:
         progress: int | None = None,
     ) -> None:
         manifest.update(job, state, message, progress)
-        self.status_callback(job)
+        if manifest is self._work_manifest and job.parent_source:
+            self._sync_parent_status(job)
+        else:
+            self.status_callback(job)
+
+    def _sync_parent_status(self, changed: BatchJob) -> None:
+        manifest = self._parent_manifest
+        parent = self._parents_by_key.get(changed.parent_key)
+        children = self._children_by_parent.get(changed.parent_key, [])
+        if manifest is None or parent is None or not children:
+            return
+        if len(children) == 1:
+            parent.clean_output = changed.clean_output
+            manifest.update(parent, changed.state, changed.message, changed.progress)
+            self.status_callback(parent)
+            return
+        progress = min(98, round(sum(item.progress for item in children) / len(children)))
+        complete = sum(
+            item.state in {JobState.COMPLETE, JobState.SKIPPED} for item in children
+        )
+        index = changed.segment_index or 1
+        state = changed.state
+        if state in {JobState.COMPLETE, JobState.SKIPPED, JobState.ERROR}:
+            state = JobState.GENERATING
+        message = (
+            f"分段 {index}/{len(children)}：{changed.message}；"
+            f"已完成 {complete}/{len(children)}"
+        )
+        manifest.update(parent, state, message, progress)
+        self.status_callback(parent)
 
     def _check_stop(self) -> None:
         if self.stop_requested():

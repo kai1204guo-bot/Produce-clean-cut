@@ -12,3 +12,5 @@ build/
 .clean-cut-models/
 test-output/
 artifacts/
+output/
+.playwright-cli/
