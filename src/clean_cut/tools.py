@@ -18,6 +18,15 @@ def locate_executable(name: str) -> str | None:
     local = Path(os.environ.get("LOCALAPPDATA", ""))
     if local:
         candidates.append(local / "Microsoft" / "WinGet" / "Links" / f"{name}.exe")
+        if name.casefold() in {"ffmpeg", "ffprobe"}:
+            candidates.append(
+                local
+                / "ProduceCleanCut"
+                / "tools"
+                / "ffmpeg"
+                / "bin"
+                / f"{name}.exe"
+            )
     if name.casefold() == "libtv":
         candidates.append(Path.home() / ".libtv" / "libtv.exe")
     for candidate in candidates:

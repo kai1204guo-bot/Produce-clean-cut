@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import urllib.request
@@ -126,25 +127,67 @@ def _run(arguments: list[str], description: str) -> None:
         raise CleanCutError(f"{description}失败：{detail[:1000]}")
 
 
-def _install_winget(package_id: str, name: str, progress: ProgressCallback) -> None:
+def _install_winget(package_id: str, name: str, progress: ProgressCallback) -> bool:
     winget = locate_executable("winget")
     if not winget:
-        raise CleanCutError("系统缺少 Windows 程序包管理器 winget，请先更新 App Installer。")
+        progress(f"未检测到 winget，改用 {name} 官方下载源…")
+        return False
     progress(f"正在安装 {name}…")
-    _run(
-        [
-            winget,
-            "install",
-            "--id",
-            package_id,
-            "--exact",
-            "--silent",
-            "--accept-package-agreements",
-            "--accept-source-agreements",
-            "--disable-interactivity",
-        ],
-        f"安装 {name}",
-    )
+    try:
+        _run(
+            [
+                winget,
+                "install",
+                "--id",
+                package_id,
+                "--exact",
+                "--silent",
+                "--accept-package-agreements",
+                "--accept-source-agreements",
+                "--disable-interactivity",
+            ],
+            f"安装 {name}",
+        )
+    except CleanCutError:
+        progress(f"winget 安装 {name} 失败，改用官方下载源…")
+        return False
+    return True
+
+
+def _install_ffmpeg_direct(progress: ProgressCallback) -> None:
+    url = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+    target = app_data_dir() / "tools" / "ffmpeg" / "bin"
+    target.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="clean-cut-ffmpeg-") as temporary:
+        archive_path = Path(temporary) / "ffmpeg.zip"
+        extract_path = Path(temporary) / "extracted"
+        progress("正在从 FFmpeg Windows 构建站下载组件（约 110 MB）…")
+        urllib.request.urlretrieve(url, archive_path)
+        progress("正在解压 FFmpeg…")
+        with zipfile.ZipFile(archive_path) as archive:
+            archive.extractall(extract_path)
+        binaries = {}
+        for name in ("ffmpeg.exe", "ffprobe.exe"):
+            matches = list(extract_path.rglob(name))
+            if len(matches) != 1:
+                raise CleanCutError(f"FFmpeg 安装包结构异常：未找到唯一的 {name}")
+            binaries[name] = matches[0]
+        for name, source in binaries.items():
+            shutil.copy2(source, target / name)
+    if not (target / "ffmpeg.exe").is_file() or not (target / "ffprobe.exe").is_file():
+        raise CleanCutError("FFmpeg 下载完成，但程序完整性检查未通过。")
+
+
+def _install_chrome_direct(progress: ProgressCallback) -> None:
+    url = "https://dl.google.com/chrome/install/latest/chrome_installer.exe"
+    with tempfile.TemporaryDirectory(prefix="clean-cut-chrome-") as temporary:
+        installer = Path(temporary) / "chrome_installer.exe"
+        progress("正在从 Google 官方地址下载 Chrome…")
+        urllib.request.urlretrieve(url, installer)
+        progress("正在安装 Google Chrome…")
+        _run([str(installer), "/silent", "/install"], "安装 Google Chrome")
+    if not _chrome_path():
+        raise CleanCutError("Chrome 安装程序已结束，但仍未检测到 Chrome。")
 
 
 def _install_libtv(progress: ProgressCallback) -> None:
@@ -219,9 +262,11 @@ def _install_cuda(progress: ProgressCallback) -> None:
 
 def install_dependency(key: str, progress: ProgressCallback = lambda _text: None) -> None:
     if key == "ffmpeg":
-        _install_winget("Gyan.FFmpeg", "FFmpeg", progress)
+        if not _install_winget("Gyan.FFmpeg", "FFmpeg", progress):
+            _install_ffmpeg_direct(progress)
     elif key == "chrome":
-        _install_winget("Google.Chrome", "Google Chrome", progress)
+        if not _install_winget("Google.Chrome", "Google Chrome", progress):
+            _install_chrome_direct(progress)
     elif key == "libtv":
         _install_libtv(progress)
     elif key == "cuda":

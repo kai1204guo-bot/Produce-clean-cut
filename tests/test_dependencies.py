@@ -1,7 +1,7 @@
 from pathlib import Path
 from unittest.mock import patch
 
-from clean_cut.dependencies import detect_dependencies
+from clean_cut.dependencies import detect_dependencies, install_dependency
 from clean_cut.tools import locate_executable
 
 
@@ -38,3 +38,23 @@ def test_dependency_detection_marks_required_tools(monkeypatch) -> None:
     assert statuses["chrome"].installed
     assert statuses["runtime"].installed
     assert not statuses["cuda"].required
+
+
+def test_ffmpeg_install_falls_back_when_winget_is_missing() -> None:
+    with (
+        patch("clean_cut.dependencies._install_winget", return_value=False),
+        patch("clean_cut.dependencies._install_ffmpeg_direct") as direct,
+    ):
+        install_dependency("ffmpeg")
+
+    direct.assert_called_once()
+
+
+def test_chrome_install_falls_back_when_winget_is_missing() -> None:
+    with (
+        patch("clean_cut.dependencies._install_winget", return_value=False),
+        patch("clean_cut.dependencies._install_chrome_direct") as direct,
+    ):
+        install_dependency("chrome")
+
+    direct.assert_called_once()
