@@ -1,11 +1,27 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from uuid import uuid4
 
+from clean_cut.batch import discover_videos
 from clean_cut.tools import write_text_atomically
+
+SERIES_SOURCE_NAMES = {"成片", "videos", "video"}
+SCAN_EXCLUDED_NAMES = {
+    ".clean-cut-segments",
+    ".git",
+    ".venv",
+    "__pycache__",
+    "clean",
+    "dist",
+    "installer-dist",
+    "output",
+    "srt",
+    "清水版",
+}
 
 
 @dataclass(slots=True)
@@ -81,4 +97,45 @@ def task_from_source(source: Path) -> SeriesTask:
         srt=str(base / "srt"),
         name=series_name_from_source(source),
         project_url=project_url,
+    )
+
+
+def discover_series_sources(root: Path) -> list[Path]:
+    """Find direct video source folders below a library root.
+
+    Output and working directories are pruned before traversal so generated media
+    can never be discovered as a new series.
+    """
+
+    root = root.resolve()
+    if not root.is_dir():
+        return []
+
+    found: list[Path] = []
+    seen: set[str] = set()
+    for current, directories, _files in os.walk(root, followlinks=False):
+        directories[:] = sorted(
+            (
+                name
+                for name in directories
+                if name.casefold() not in SCAN_EXCLUDED_NAMES
+                and not name.startswith(".")
+            ),
+            key=str.casefold,
+        )
+        folder = Path(current)
+        if folder.name.casefold() not in SERIES_SOURCE_NAMES:
+            continue
+        if not discover_videos(folder):
+            directories[:] = []
+            continue
+        key = str(folder.resolve()).casefold()
+        if key not in seen:
+            found.append(folder.resolve())
+            seen.add(key)
+        directories[:] = []
+
+    return sorted(
+        found,
+        key=lambda path: (series_name_from_source(path).casefold(), str(path).casefold()),
     )

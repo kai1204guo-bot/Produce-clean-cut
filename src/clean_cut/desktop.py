@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import queue
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -25,7 +26,12 @@ from clean_cut.dependencies import detect_dependencies, install_dependency
 from clean_cut.errors import CleanCutError, LibTvAuthenticationError
 from clean_cut.libtv_web import LibTvWebBatchRunner
 from clean_cut.paths import app_data_dir
-from clean_cut.series_queue import SeriesQueueStore, SeriesTask, task_from_source
+from clean_cut.series_queue import (
+    SeriesQueueStore,
+    SeriesTask,
+    discover_series_sources,
+    task_from_source,
+)
 from clean_cut.tools import write_text_atomically
 
 PROJECT_URL_FILE = ".clean-cut-project-url.txt"
@@ -34,23 +40,27 @@ LOGIN_FALLBACK_URL = (
     "https://www.liblib.tv/canvas?"
     "spaceId=7887875&projectId=a282f30b20a04d8aac4e32d20f901f73"
 )
+UI_FONT = "Microsoft YaHei UI"
 
 
 class CleanCutApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("清水版批量制作")
-        self.geometry("1120x720")
-        self.minsize(920, 700)
-        self.configure(bg="#F0FDFA")
+        self.geometry("1180x800")
+        self.minsize(980, 720)
+        self.configure(bg="#F5F5F7")
         self._events: queue.Queue[tuple[str, object]] = queue.Queue()
+        self._queue_lock = threading.RLock()
         self._stop_event = threading.Event()
         self._worker: threading.Thread | None = None
         self._rows: dict[str, str] = {}
         self._queue_rows: dict[str, str] = {}
         self._active_series_id = ""
         self._queue_store = SeriesQueueStore(app_data_dir() / "series-queue.json")
+        self._settings_path = app_data_dir() / "desktop-settings.json"
         self._series_tasks = self._queue_store.load()
+        self._last_scan_root = self._load_last_scan_root()
 
         self.source_var = tk.StringVar()
         self.clean_var = tk.StringVar()
@@ -61,6 +71,8 @@ class CleanCutApp(tk.Tk):
         self.srt_enabled_var = tk.BooleanVar(value=True)
         self.asr_device_var = tk.StringVar(value="auto")
         self.summary_var = tk.StringVar(value="请选择包含剧集视频的文件夹")
+        self.queue_summary_var = tk.StringVar(value="队列为空")
+        self._details_visible = False
 
         self._configure_style()
         self._build_ui()
@@ -71,49 +83,135 @@ class CleanCutApp(tk.Tk):
     def _configure_style(self) -> None:
         style = ttk.Style(self)
         style.theme_use("clam")
-        style.configure("TFrame", background="#F0FDFA")
+        style.configure("TFrame", background="#F5F5F7")
         style.configure("Card.TFrame", background="#FFFFFF")
-        style.configure("TLabel", background="#F0FDFA", foreground="#134E4A", font=("Segoe UI", 10))
-        style.configure("Title.TLabel", font=("Segoe UI Semibold", 22), foreground="#134E4A")
-        style.configure("Muted.TLabel", foreground="#475569")
+        style.configure(
+            "TLabel",
+            background="#F5F5F7",
+            foreground="#1D1D1F",
+            font=(UI_FONT, 10),
+        )
+        style.configure(
+            "Surface.TLabel",
+            background="#FFFFFF",
+            foreground="#1D1D1F",
+            font=(UI_FONT, 10),
+        )
+        style.configure(
+            "Title.TLabel",
+            font=(UI_FONT, 22, "bold"),
+            foreground="#1D1D1F",
+        )
+        style.configure(
+            "Section.TLabel",
+            background="#FFFFFF",
+            foreground="#1D1D1F",
+            font=(UI_FONT, 11, "bold"),
+        )
+        style.configure("Muted.TLabel", foreground="#6E6E73")
+        style.configure(
+            "SurfaceMuted.TLabel", background="#FFFFFF", foreground="#6E6E73"
+        )
+        style.configure(
+            "TButton",
+            background="#FFFFFF",
+            foreground="#1D1D1F",
+            bordercolor="#C7C7CC",
+            padding=(12, 8),
+            font=(UI_FONT, 9),
+        )
+        style.map(
+            "TButton",
+            background=[("active", "#E9E9ED"), ("disabled", "#F2F2F7")],
+            foreground=[("disabled", "#AEAEB2")],
+            bordercolor=[("focus", "#0078D4")],
+        )
         style.configure(
             "Primary.TButton",
-            background="#0D9488",
-            foreground="#000000",
-            padding=(18, 11),
-            font=("Segoe UI Semibold", 10),
+            background="#0078D4",
+            foreground="#FFFFFF",
+            bordercolor="#0078D4",
+            padding=(18, 10),
+            font=(UI_FONT, 10, "bold"),
         )
-        style.map("Primary.TButton", background=[("active", "#14B8A6"), ("disabled", "#99F6E4")])
+        style.map(
+            "Primary.TButton",
+            background=[("active", "#106EBE"), ("disabled", "#D2D2D7")],
+            foreground=[("disabled", "#8E8E93")],
+        )
         style.configure(
-            "Accent.TButton", background="#EA580C", foreground="#000000", padding=(18, 11)
+            "Accent.TButton",
+            background="#0078D4",
+            foreground="#FFFFFF",
+            bordercolor="#0078D4",
+            padding=(18, 10),
+            font=(UI_FONT, 10, "bold"),
         )
-        style.map("Accent.TButton", background=[("active", "#F97316")])
-        style.configure("Treeview", rowheight=30, font=("Segoe UI", 9), fieldbackground="#FFFFFF")
-        style.configure("Treeview.Heading", font=("Segoe UI Semibold", 9), background="#E8F1F4")
+        style.map(
+            "Accent.TButton",
+            background=[("active", "#106EBE"), ("disabled", "#D2D2D7")],
+            foreground=[("disabled", "#8E8E93")],
+        )
+        style.configure(
+            "TEntry", fieldbackground="#FFFFFF", bordercolor="#C7C7CC", padding=7
+        )
+        style.configure(
+            "Treeview",
+            rowheight=31,
+            font=(UI_FONT, 9),
+            background="#FFFFFF",
+            fieldbackground="#FFFFFF",
+            foreground="#1D1D1F",
+            bordercolor="#D2D2D7",
+        )
+        style.map(
+            "Treeview",
+            background=[("selected", "#DCEEFF")],
+            foreground=[("selected", "#1D1D1F")],
+        )
+        style.configure(
+            "Treeview.Heading",
+            font=(UI_FONT, 9, "bold"),
+            background="#F2F2F7",
+            foreground="#3A3A3C",
+            padding=(8, 7),
+        )
 
     def _build_ui(self) -> None:
-        root = ttk.Frame(self, padding=24)
+        root = ttk.Frame(self, padding=(24, 20, 24, 18))
         root.pack(fill="both", expand=True)
-        ttk.Label(root, text="清水版批量制作", style="Title.TLabel").pack(anchor="w")
+        header = ttk.Frame(root)
+        header.pack(fill="x")
+        ttk.Label(header, text="清水版批量制作", style="Title.TLabel").pack(
+            side="left", anchor="w"
+        )
+        ttk.Label(header, text="v0.4.0", style="Muted.TLabel").pack(
+            side="left", padx=(10, 0), pady=(8, 0)
+        )
         ttk.Label(
             root,
             text=(
-                "支持多部剧排队无人值守；超过 60 秒自动均匀分段，"
-                "完成后无缝合并并恢复封面。"
+                "一次扫描全部剧集，按队列无人值守处理；长视频自动分段并无缝合并。"
             ),
             style="Muted.TLabel",
-        ).pack(anchor="w", pady=(4, 10))
+        ).pack(anchor="w", pady=(3, 14))
 
-        queue_card = ttk.Frame(root, style="Card.TFrame", padding=10)
-        queue_card.pack(fill="x", pady=(0, 10))
+        queue_card = ttk.Frame(root, style="Card.TFrame", padding=14)
+        queue_card.pack(fill="x", pady=(0, 12))
         queue_actions = ttk.Frame(queue_card, style="Card.TFrame")
-        queue_actions.pack(fill="x", pady=(0, 6))
+        queue_actions.pack(fill="x", pady=(0, 10))
         ttk.Label(
-            queue_actions, text="多剧任务队列", background="#FFFFFF", font=("Segoe UI Semibold", 11)
+            queue_actions, text="任务队列", style="Section.TLabel"
         ).pack(side="left")
         ttk.Button(
-            queue_actions, text="添加剧集文件夹", command=self._add_series
-        ).pack(side="left", padx=(14, 4))
+            queue_actions,
+            text="扫描总文件夹…",
+            style="Primary.TButton",
+            command=self._scan_series_library,
+        ).pack(side="left", padx=(16, 6))
+        ttk.Button(
+            queue_actions, text="添加单部剧…", command=self._add_series
+        ).pack(side="left", padx=4)
         ttk.Button(queue_actions, text="移除选中", command=self._remove_series).pack(
             side="left", padx=4
         )
@@ -123,43 +221,85 @@ class CleanCutApp(tk.Tk):
         ttk.Button(
             queue_actions, text="下移", command=lambda: self._move_series(1)
         ).pack(side="left", padx=4)
-        ttk.Button(
-            queue_actions, text="环境检测 / 一键安装", command=self._open_dependency_center
-        ).pack(side="right")
+        self.environment_button = ttk.Button(
+            queue_actions, text="运行环境", command=self._open_dependency_center
+        )
+        self.environment_button.pack(side="right")
+        ttk.Label(
+            queue_actions,
+            textvariable=self.queue_summary_var,
+            style="SurfaceMuted.TLabel",
+        ).pack(side="right", padx=(0, 14))
+        queue_table = ttk.Frame(queue_card, style="Card.TFrame")
+        queue_table.pack(fill="x")
+        queue_scroll = ttk.Scrollbar(queue_table, orient="vertical")
         self.queue_tree = ttk.Treeview(
-            queue_card,
+            queue_table,
             columns=("series", "source", "state", "message"),
             show="headings",
-            height=4,
+            height=5,
+            yscrollcommand=queue_scroll.set,
         )
+        queue_scroll.configure(command=self.queue_tree.yview)
         for column, title, width in (
-            ("series", "剧名", 180),
-            ("source", "成片文件夹", 430),
-            ("state", "状态", 100),
-            ("message", "说明", 300),
+            ("series", "剧名", 190),
+            ("source", "成片文件夹", 440),
+            ("state", "状态", 90),
+            ("message", "当前进展", 330),
         ):
             self.queue_tree.heading(column, text=title)
             self.queue_tree.column(column, width=width, anchor="w")
-        self.queue_tree.pack(fill="x")
+        queue_scroll.pack(side="right", fill="y")
+        self.queue_tree.pack(side="left", fill="x", expand=True)
         self.queue_tree.bind("<<TreeviewSelect>>", self._select_series)
+        self.queue_tree.bind("<Double-1>", lambda _event: self._toggle_details(True))
 
-        form = ttk.Frame(root, style="Card.TFrame", padding=18)
-        form.pack(fill="x")
-        self._path_row(form, 0, "成片文件夹", self.source_var, self._choose_source)
+        details = ttk.Frame(root, style="Card.TFrame", padding=(14, 10))
+        details.pack(fill="x")
+        details_header = ttk.Frame(details, style="Card.TFrame")
+        details_header.pack(fill="x")
+        ttk.Label(details_header, text="所选剧集", style="Section.TLabel").pack(
+            side="left"
+        )
+        ttk.Label(
+            details_header,
+            text="双击队列项目可查看或修改路径",
+            style="SurfaceMuted.TLabel",
+        ).pack(side="left", padx=(12, 0))
+        self.details_button = ttk.Button(
+            details_header, text="显示详情", command=self._toggle_details
+        )
+        self.details_button.pack(side="right")
+        self.details_body = ttk.Frame(details, style="Card.TFrame")
         self._path_row(
-            form, 1, "清水版文件夹", self.clean_var, lambda: self._choose_dir(self.clean_var)
+            self.details_body, 0, "成片文件夹", self.source_var, self._choose_source
         )
-        self._path_row(form, 2, "SRT 文件夹", self.srt_var, lambda: self._choose_dir(self.srt_var))
-        ttk.Label(form, text="LibTV 画布网址", background="#FFFFFF").grid(
-            row=3, column=0, sticky="w", pady=7
+        self._path_row(
+            self.details_body,
+            1,
+            "清水版文件夹",
+            self.clean_var,
+            lambda: self._choose_dir(self.clean_var),
         )
-        ttk.Entry(form, textvariable=self.project_var).grid(
-            row=3, column=1, columnspan=2, sticky="ew", padx=(12, 0), pady=7
+        self._path_row(
+            self.details_body,
+            2,
+            "SRT 文件夹",
+            self.srt_var,
+            lambda: self._choose_dir(self.srt_var),
         )
-        form.columnconfigure(1, weight=1)
+        ttk.Label(
+            self.details_body, text="LibTV 画布网址", style="Surface.TLabel"
+        ).grid(
+            row=3, column=0, sticky="w", pady=6
+        )
+        ttk.Entry(self.details_body, textvariable=self.project_var).grid(
+            row=3, column=1, columnspan=2, sticky="ew", padx=(12, 0), pady=6
+        )
+        self.details_body.columnconfigure(1, weight=1)
 
         actions = ttk.Frame(root)
-        actions.pack(fill="x", pady=16)
+        actions.pack(fill="x", pady=(12, 10))
         ttk.Checkbutton(actions, text="跳过已有清水版", variable=self.skip_var).pack(side="left")
         ttk.Checkbutton(actions, text="生成 SRT", variable=self.srt_enabled_var).pack(
             side="left", padx=(20, 0)
@@ -182,15 +322,27 @@ class CleanCutApp(tk.Tk):
         )
         self.stop_button.pack(side="right", padx=8)
         self.start_button = ttk.Button(
-            actions, text="开始批量处理", style="Accent.TButton", command=self._start
+            actions, text="开始全部任务", style="Accent.TButton", command=self._start
         )
         self.start_button.pack(side="right")
 
-        ttk.Label(root, textvariable=self.summary_var, style="Muted.TLabel").pack(
-            anchor="w", pady=(0, 8)
-        )
+        status = ttk.Frame(root, style="Card.TFrame", padding=(12, 8))
+        status.pack(fill="x", pady=(0, 8))
+        ttk.Label(status, text="当前状态", style="Section.TLabel").pack(side="left")
+        ttk.Label(
+            status, textvariable=self.summary_var, style="SurfaceMuted.TLabel"
+        ).pack(side="left", padx=(12, 0))
         columns = ("episode", "file", "state", "progress", "message")
-        self.tree = ttk.Treeview(root, columns=columns, show="headings")
+        episode_table = ttk.Frame(root)
+        episode_table.pack(fill="both", expand=True)
+        episode_scroll = ttk.Scrollbar(episode_table, orient="vertical")
+        self.tree = ttk.Treeview(
+            episode_table,
+            columns=columns,
+            show="headings",
+            yscrollcommand=episode_scroll.set,
+        )
+        episode_scroll.configure(command=self.tree.yview)
         headings = {
             "episode": "集数",
             "file": "文件",
@@ -202,7 +354,20 @@ class CleanCutApp(tk.Tk):
         for column in columns:
             self.tree.heading(column, text=headings[column])
             self.tree.column(column, width=widths[column], anchor="w")
-        self.tree.pack(fill="both", expand=True)
+        episode_scroll.pack(side="right", fill="y")
+        self.tree.pack(side="left", fill="both", expand=True)
+
+    def _toggle_details(self, show: bool | None = None) -> None:
+        visible = not self._details_visible if show is None else show
+        if visible == self._details_visible:
+            return
+        self._details_visible = visible
+        if visible:
+            self.details_body.pack(fill="x", pady=(8, 0))
+            self.details_button.configure(text="收起详情")
+        else:
+            self.details_body.pack_forget()
+            self.details_button.configure(text="显示详情")
 
     def _render_queue(self) -> None:
         for item in self.queue_tree.get_children():
@@ -212,17 +377,245 @@ class CleanCutApp(tk.Tk):
             row = self.queue_tree.insert(
                 "",
                 "end",
-                values=(task.name, task.source, task.state, task.message),
+                values=(
+                    task.name,
+                    task.source,
+                    self._state_label(task.state),
+                    task.message,
+                ),
+                tags=(task.state,),
             )
             self._queue_rows[task.task_id] = row
+        self.queue_tree.tag_configure("completed", foreground="#248A3D")
+        self.queue_tree.tag_configure("partial", foreground="#B25000")
+        self.queue_tree.tag_configure("failed", foreground="#D70015")
+        self.queue_tree.tag_configure("running", foreground="#0067B9")
+        self._update_queue_summary()
+
+    def _update_queue_summary(self) -> None:
+        total = len(self._series_tasks)
+        pending = sum(task.state != "completed" for task in self._series_tasks)
+        self.queue_summary_var.set(
+            "队列为空，请先扫描总文件夹"
+            if total == 0
+            else f"共 {total} 部 · 待处理 {pending} 部"
+        )
+
+    @staticmethod
+    def _state_label(state: str) -> str:
+        return {
+            "pending": "等待",
+            "running": "处理中",
+            "completed": "已完成",
+            "partial": "部分完成",
+            "failed": "失败",
+        }.get(state, state)
 
     def _save_queue(self) -> None:
-        self._queue_store.save(self._series_tasks)
+        with self._queue_lock:
+            self._queue_store.save(list(self._series_tasks))
+
+    def _load_last_scan_root(self) -> str:
+        if not self._settings_path.is_file():
+            return ""
+        try:
+            payload = json.loads(self._settings_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return ""
+        value = payload.get("last_scan_root", "")
+        return value if isinstance(value, str) else ""
+
+    def _remember_scan_root(self, root: Path) -> None:
+        self._last_scan_root = str(root.resolve())
+        write_text_atomically(
+            self._settings_path,
+            json.dumps({"last_scan_root": self._last_scan_root}, ensure_ascii=False),
+        )
+
+    def _scan_series_library(self) -> None:
+        initial = self._last_scan_root if Path(self._last_scan_root).is_dir() else ""
+        folder = filedialog.askdirectory(
+            title="选择包含多部剧的总文件夹", initialdir=initial or None
+        )
+        if not folder:
+            return
+        root = Path(folder)
+        self._remember_scan_root(root)
+
+        progress = tk.Toplevel(self)
+        progress.title("正在扫描")
+        progress.geometry("420x150")
+        progress.resizable(False, False)
+        progress.transient(self)
+        progress.grab_set()
+        body = ttk.Frame(progress, padding=20)
+        body.pack(fill="both", expand=True)
+        ttk.Label(body, text="正在查找剧集文件夹…", font=(UI_FONT, 12, "bold")).pack(
+            anchor="w"
+        )
+        ttk.Label(
+            body,
+            text="会自动排除清水版、SRT 和临时处理目录。",
+            style="Muted.TLabel",
+        ).pack(anchor="w", pady=(6, 14))
+        bar = ttk.Progressbar(body, mode="indeterminate")
+        bar.pack(fill="x")
+        bar.start(12)
+
+        def finish(sources: list[Path] | None, error: str = "") -> None:
+            if progress.winfo_exists():
+                progress.destroy()
+            if error:
+                messagebox.showerror("扫描失败", error)
+                return
+            self._show_scan_preview(root, sources or [])
+
+        def work() -> None:
+            try:
+                sources = discover_series_sources(root)
+            except Exception as exc:
+                self.after(0, finish, None, str(exc))
+            else:
+                self.after(0, finish, sources)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _show_scan_preview(self, root: Path, sources: list[Path]) -> None:
+        if not sources:
+            messagebox.showinfo(
+                "未发现剧集",
+                "没有找到包含视频的“成片”文件夹。\n\n"
+                "请确认结构类似：总文件夹\\剧名\\成片\\EP1.mp4",
+            )
+            return
+
+        existing = {
+            str(Path(task.source).resolve()).casefold() for task in self._series_tasks
+        }
+        window = tk.Toplevel(self)
+        window.title("确认批量加入")
+        window.geometry("900x560")
+        window.minsize(760, 440)
+        window.transient(self)
+        window.grab_set()
+        frame = ttk.Frame(window, padding=20)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(
+            frame,
+            text=f"扫描完成：发现 {len(sources)} 部剧",
+            font=(UI_FONT, 16, "bold"),
+        ).pack(anchor="w")
+        ttk.Label(
+            frame,
+            text=f"总目录：{root}。请选择要加入任务队列的项目。",
+            style="Muted.TLabel",
+        ).pack(anchor="w", pady=(4, 12))
+
+        table = ttk.Frame(frame)
+        table.pack(fill="both", expand=True)
+        scroll = ttk.Scrollbar(table, orient="vertical")
+        tree = ttk.Treeview(
+            table,
+            columns=("series", "episodes", "state", "source"),
+            show="headings",
+            selectmode="extended",
+            yscrollcommand=scroll.set,
+        )
+        scroll.configure(command=tree.yview)
+        for column, title, width in (
+            ("series", "剧名", 180),
+            ("episodes", "集数", 70),
+            ("state", "队列状态", 100),
+            ("source", "成片文件夹", 480),
+        ):
+            tree.heading(column, text=title)
+            tree.column(column, width=width, anchor="w")
+        source_by_row: dict[str, Path] = {}
+        for source in sources:
+            key = str(source.resolve()).casefold()
+            row = tree.insert(
+                "",
+                "end",
+                values=(
+                    task_from_source(source).name,
+                    len(discover_videos(source)),
+                    "已在队列" if key in existing else "待加入",
+                    str(source),
+                ),
+                tags=("existing",) if key in existing else (),
+            )
+            source_by_row[row] = source
+        tree.tag_configure("existing", foreground="#6E6E73")
+        scroll.pack(side="right", fill="y")
+        tree.pack(side="left", fill="both", expand=True)
+        tree.selection_set(
+            *(
+                row
+                for row, source in source_by_row.items()
+                if str(source).casefold() not in existing
+            )
+        )
+
+        actions = ttk.Frame(frame)
+        actions.pack(fill="x", pady=(12, 0))
+
+        def add_selected() -> None:
+            selected = [source_by_row[row] for row in tree.selection()]
+            added: list[SeriesTask] = []
+            skipped = 0
+            current = {
+                str(Path(task.source).resolve()).casefold() for task in self._series_tasks
+            }
+            for source in selected:
+                key = str(source.resolve()).casefold()
+                if key in current:
+                    skipped += 1
+                    continue
+                task = task_from_source(source)
+                self._series_tasks.append(task)
+                added.append(task)
+                current.add(key)
+            self._save_queue()
+            self._render_queue()
+            window.destroy()
+            running = bool(self._worker and self._worker.is_alive())
+            if added and not running:
+                row = self._queue_rows[added[0].task_id]
+                self.queue_tree.selection_set(row)
+                self.queue_tree.see(row)
+                self._load_series_into_form(added[0])
+            running_note = (
+                "；当前任务结束前加入的项目会接着处理"
+                if running
+                else ""
+            )
+            self.summary_var.set(
+                f"已加入 {len(added)} 部，跳过重复 {skipped} 部{running_note}"
+            )
+
+        ttk.Button(
+            actions,
+            text="加入所选项目",
+            style="Primary.TButton",
+            command=add_selected,
+        ).pack(side="right")
+        ttk.Button(actions, text="取消", command=window.destroy).pack(
+            side="right", padx=(0, 8)
+        )
+        ttk.Button(
+            actions,
+            text="全选",
+            command=lambda: tree.selection_set(*tree.get_children()),
+        ).pack(side="left")
+        ttk.Button(
+            actions,
+            text="清除选择",
+            command=lambda: tree.selection_remove(*tree.selection()),
+        ).pack(
+            side="left", padx=8
+        )
 
     def _add_series(self) -> None:
-        if self._worker and self._worker.is_alive():
-            messagebox.showinfo("任务运行中", "请先停止当前队列，再添加新剧。")
-            return
         folder = filedialog.askdirectory(title="选择一部剧的成片文件夹")
         if not folder:
             return
@@ -241,18 +634,22 @@ class CleanCutApp(tk.Tk):
             None,
         )
         if existing:
-            existing.state = "pending"
-            existing.message = "已重新加入队列"
+            if existing.state == "completed":
+                existing.state = "pending"
+                existing.message = "已重新加入队列"
             task = existing
         else:
             task = task_from_source(source)
             self._series_tasks.append(task)
         self._save_queue()
         self._render_queue()
-        row = self._queue_rows[task.task_id]
-        self.queue_tree.selection_set(row)
-        self.queue_tree.see(row)
-        self._load_series_into_form(task)
+        if self._worker and self._worker.is_alive():
+            self.summary_var.set(f"《{task.name}》已加入队列，将接着处理")
+        else:
+            row = self._queue_rows[task.task_id]
+            self.queue_tree.selection_set(row)
+            self.queue_tree.see(row)
+            self._load_series_into_form(task)
 
     def _selected_task(self) -> SeriesTask | None:
         selected = self.queue_tree.selection()
@@ -305,13 +702,13 @@ class CleanCutApp(tk.Tk):
         self.queue_tree.selection_set(self._queue_rows[task.task_id])
 
     def _path_row(self, parent, row: int, label: str, variable: tk.StringVar, command) -> None:
-        ttk.Label(parent, text=label, background="#FFFFFF").grid(
-            row=row, column=0, sticky="w", pady=7
+        ttk.Label(parent, text=label, style="Surface.TLabel").grid(
+            row=row, column=0, sticky="w", pady=6
         )
         ttk.Entry(parent, textvariable=variable).grid(
-            row=row, column=1, sticky="ew", padx=12, pady=7
+            row=row, column=1, sticky="ew", padx=12, pady=6
         )
-        ttk.Button(parent, text="选择文件夹", command=command).grid(row=row, column=2, pady=7)
+        ttk.Button(parent, text="选择…", command=command).grid(row=row, column=2, pady=6)
 
     def _choose_source(self) -> None:
         folder = filedialog.askdirectory(title="选择成片文件夹")
@@ -394,9 +791,13 @@ class CleanCutApp(tk.Tk):
             self._open_dependency_center()
             return
 
-        tasks = [task for task in self._series_tasks if task.state != "completed"]
-        ephemeral = False
-        if not tasks:
+        ephemeral = not self._series_tasks
+        if self._series_tasks:
+            tasks = self._series_tasks
+            if not any(task.state != "completed" for task in tasks):
+                messagebox.showinfo("没有待处理任务", "队列中的项目均已完成。")
+                return
+        else:
             source = Path(self.source_var.get())
             if not source.is_dir() or not discover_videos(source):
                 messagebox.showerror("无法开始", "请添加剧集到队列，或选择有效的成片文件夹。")
@@ -406,14 +807,18 @@ class CleanCutApp(tk.Tk):
             task.srt = self.srt_var.get().strip() or task.srt
             task.project_url = self.project_var.get().strip()
             tasks = [task]
-            ephemeral = True
+
+        disk_issue = self._disk_space_issue(tasks)
+        if disk_issue:
+            messagebox.showerror("磁盘空间不足", disk_issue)
+            return
 
         batch_size = self.batch_var.get()
         skip_existing = self.skip_var.get()
         srt_enabled = self.srt_enabled_var.get()
         asr_device = self.asr_device_var.get()
         self._stop_event.clear()
-        self.start_button.configure(state="disabled")
+        self.start_button.configure(state="disabled", text="正在处理…")
         self.stop_button.configure(state="normal")
 
         def work() -> None:
@@ -424,6 +829,8 @@ class CleanCutApp(tk.Tk):
             for task in tasks:
                 if self._stop_event.is_set():
                     break
+                if task.state == "completed":
+                    continue
                 try:
                     task.state = "running"
                     task.message = "正在准备"
@@ -552,6 +959,42 @@ class CleanCutApp(tk.Tk):
 
         self._worker = threading.Thread(target=work, daemon=True)
         self._worker.start()
+
+    @staticmethod
+    def _disk_space_issue(tasks: list[SeriesTask]) -> str:
+        usage_by_volume: dict[str, tuple[Path, int]] = {}
+        for task in tasks:
+            if task.state == "completed":
+                continue
+            source = Path(task.source)
+            if not source.is_dir():
+                continue
+            media_bytes = sum(
+                video.stat().st_size
+                for video in discover_videos(source)
+                if video.is_file()
+            )
+            destination = Path(task.clean)
+            probe = destination
+            while not probe.exists() and probe != probe.parent:
+                probe = probe.parent
+            volume = destination.anchor.casefold()
+            current_probe, current_bytes = usage_by_volume.get(
+                volume, (probe, 0)
+            )
+            usage_by_volume[volume] = (current_probe, current_bytes + media_bytes)
+
+        for probe, media_bytes in usage_by_volume.values():
+            required = int(media_bytes * 1.35) + 1024**3
+            free = shutil.disk_usage(probe).free
+            if free < required:
+                return (
+                    f"输出盘剩余 {free / 1024**3:.1f} GB，预计至少需要 "
+                    f"{required / 1024**3:.1f} GB。\n\n"
+                    "临时分段保存在清水版目录，不会占用 C 盘；请清理输出盘"
+                    "或减少本次队列后再开始。"
+                )
+        return ""
 
     def _activate_series(self, task: SeriesTask, videos: list[Path]) -> None:
         ready: queue.Queue[bool] = queue.Queue(maxsize=1)
@@ -737,14 +1180,14 @@ class CleanCutApp(tk.Tk):
             item for item in detect_dependencies() if item.required and not item.installed
         ]
         if not missing:
+            self.environment_button.configure(text="运行环境 · 正常")
             return
-        if messagebox.askyesno(
-            "需要安装运行组件",
-            "检测到缺少："
+        self.environment_button.configure(text=f"运行环境 · 缺少 {len(missing)} 项")
+        self.summary_var.set(
+            "运行环境缺少："
             + "、".join(item.name for item in missing)
-            + "\n\n是否打开一键安装中心？",
-        ):
-            self._open_dependency_center()
+            + "；开始前请打开运行环境完成安装"
+        )
 
     def _open_dependency_center(self) -> None:
         window = tk.Toplevel(self)
@@ -904,8 +1347,15 @@ class CleanCutApp(tk.Tk):
                 if row:
                     self.queue_tree.item(
                         row,
-                        values=(task.name, task.source, task.state, task.message),
+                        values=(
+                            task.name,
+                            task.source,
+                            self._state_label(task.state),
+                            task.message,
+                        ),
+                        tags=(task.state,),
                     )
+                self._update_queue_summary()
                 if task.task_id == self._active_series_id:
                     self.project_var.set(task.project_url)
             elif kind == "error":
@@ -915,7 +1365,6 @@ class CleanCutApp(tk.Tk):
                 messagebox.showinfo("提示", str(value))
             elif kind == "done":
                 self.summary_var.set(str(value))
-                messagebox.showinfo("处理完成", str(value))
             elif kind == "retry_prompt":
                 failed, retry_answer = value
                 retry = messagebox.askyesno(
@@ -930,7 +1379,7 @@ class CleanCutApp(tk.Tk):
                 )
                 retry_answer.put(retry)
             elif kind == "idle":
-                self.start_button.configure(state="normal")
+                self.start_button.configure(state="normal", text="开始全部任务")
                 self.stop_button.configure(state="disabled")
         self.after(150, self._drain_events)
 
