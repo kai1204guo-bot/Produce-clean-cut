@@ -28,6 +28,7 @@ if ($LASTEXITCODE -ne 0) { throw "安装桌面版构建依赖失败。" }
     --clean `
     --windowed `
     --onedir `
+    --icon (Join-Path $projectRoot "assets\app-icon.ico") `
     --name "清水版批量制作" `
     --distpath (Join-Path $projectRoot $OutputDirectory) `
     --workpath (Join-Path $buildRoot "work") `
@@ -40,6 +41,7 @@ if ($LASTEXITCODE -ne 0) { throw "安装桌面版构建依赖失败。" }
     --add-data "$(Join-Path $pythonBase 'tcl\tcl8.6');_tcl_data" `
     --add-data "$(Join-Path $pythonBase 'tcl\tk8.6');_tk_data" `
     --runtime-hook (Join-Path $projectRoot "src\clean_cut\pyi_rth_tk.py") `
+    --add-data "$(Join-Path $projectRoot 'assets');assets" `
     --collect-all playwright `
     --collect-all faster_whisper `
     --collect-all ctranslate2 `

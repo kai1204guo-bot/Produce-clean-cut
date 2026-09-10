@@ -12,8 +12,8 @@ This file overrides the project master for the Windows desktop production tool.
 - primary_action: start all pending series
 - appearance: light
 - exact_text: existing Chinese product copy
-- reusable_assets: none
-- rights_status: not_applicable
+- reusable_assets: user-supplied gold crescent/LV logo
+- rights_status: user_supplied; use authorized by the user for this application
 - output_format: editable Python source plus Windows installer
 - dashboard_type: operational
 - primary_decision: what is running, blocked, complete, or safe to retry

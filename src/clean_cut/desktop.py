@@ -43,10 +43,20 @@ LOGIN_FALLBACK_URL = (
 UI_FONT = "Microsoft YaHei UI"
 
 
+def _asset_path(name: str) -> Path:
+    bundle_root = getattr(sys, "_MEIPASS", None)
+    root = Path(bundle_root) if bundle_root else Path(__file__).resolve().parents[2]
+    return root / "assets" / name
+
+
 class CleanCutApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("清水版批量制作")
+        try:
+            self.iconbitmap(default=str(_asset_path("app-icon.ico")))
+        except tk.TclError:
+            pass
         self.geometry("1180x800")
         self.minsize(980, 720)
         self.configure(bg="#F5F5F7")
@@ -182,11 +192,18 @@ class CleanCutApp(tk.Tk):
         root.pack(fill="both", expand=True)
         header = ttk.Frame(root)
         header.pack(fill="x")
+        self._logo_image = tk.PhotoImage(file=str(_asset_path("app-logo.png")))
+        tk.Label(
+            header,
+            image=self._logo_image,
+            background="#F5F5F7",
+            borderwidth=0,
+        ).pack(side="left", padx=(0, 12))
         ttk.Label(header, text="清水版批量制作", style="Title.TLabel").pack(
-            side="left", anchor="w"
+            side="left", anchor="w", pady=(10, 0)
         )
-        ttk.Label(header, text="v0.4.0", style="Muted.TLabel").pack(
-            side="left", padx=(10, 0), pady=(8, 0)
+        ttk.Label(header, text="v0.4.1", style="Muted.TLabel").pack(
+            side="left", padx=(10, 0), pady=(18, 0)
         )
         ttk.Label(
             root,

@@ -1,5 +1,5 @@
 #define MyAppName "清水版批量制作"
-#define MyAppVersion "0.4.0"
+#define MyAppVersion "0.4.1"
 #define MyAppPublisher "Produce Clean Cut"
 #define MyAppExeName "清水版批量制作.exe"
 
@@ -19,6 +19,7 @@ OutputBaseFilename=清水版批量制作-安装程序-v{#MyAppVersion}
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
+SetupIconFile=assets\app-icon.ico
 CloseApplications=yes
 RestartApplications=no
 UninstallDisplayIcon={app}\{#MyAppExeName}
