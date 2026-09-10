@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
 import os
 import queue
+import subprocess
 import sys
 import tempfile
 import threading
+import time
 import tkinter as tk
 import traceback
 from pathlib import Path
@@ -472,6 +475,9 @@ class CleanCutApp(tk.Tk):
                                 Path(active_task.srt),
                                 active_callback,
                                 device=asr_device,
+                                series_callback=lambda text: self._set_series_message(
+                                    active_task, text, ephemeral
+                                ),
                             )
                         except Exception as exc:
                             errors.append(exc)
@@ -534,6 +540,12 @@ class CleanCutApp(tk.Tk):
             self._save_queue()
         self._events.put(("series", task))
 
+    def _set_series_message(
+        self, task: SeriesTask, message: str, ephemeral: bool
+    ) -> None:
+        task.message = message
+        self._queue_changed(task, ephemeral)
+
     def _generate_srt(
         self,
         manifest: BatchManifest,
@@ -541,10 +553,10 @@ class CleanCutApp(tk.Tk):
         callback,
         *,
         device: str,
+        series_callback=lambda _text: None,
     ) -> None:
         output_dir.mkdir(parents=True, exist_ok=True)
         active_device = "cuda" if device == "auto" else device
-        compute_type = "float16" if active_device == "cuda" else "int8"
         pending = []
         for job in manifest.jobs.values():
             destination = output_dir / f"{episode_stem(job.source_path)}.srt"
@@ -554,47 +566,134 @@ class CleanCutApp(tk.Tk):
         if not pending:
             return
         try:
-            transcriber = FasterWhisperTranscriber(
-                model="turbo", device=active_device, compute_type=compute_type
+            self._run_srt_process(
+                pending,
+                active_device,
+                callback,
+                series_callback,
+                idle_timeout=600 if active_device == "cuda" else 3600,
             )
-        except CleanCutError:
-            if device != "auto" or active_device != "cuda":
+        except CleanCutError as gpu_error:
+            if active_device != "cuda" or self._stop_event.is_set():
                 raise
-            active_device = "cpu"
-            transcriber = FasterWhisperTranscriber(
-                model="turbo", device="cpu", compute_type="int8"
-            )
-        for index, (job, destination) in enumerate(pending, 1):
-            if self._stop_event.is_set():
-                raise RuntimeError("用户已停止任务。")
-            job.message = f"生成 SRT（{index}/{len(pending)}）"
-            callback(job)
-            try:
-                transcriber.write_srt(job.source_path, destination, language="en")
-            except CleanCutError as first_error:
-                if device != "auto" or active_device != "cuda":
-                    raise
-                job.message = "GPU 首次转写失败，正在重新初始化并重试"
-                callback(job)
-                try:
-                    transcriber = FasterWhisperTranscriber(
-                        model="turbo", device="cuda", compute_type="float16"
-                    )
-                    transcriber.write_srt(job.source_path, destination, language="en")
-                except CleanCutError as retry_error:
-                    active_device = "cpu"
-                    self._write_gpu_error(first_error, retry_error)
-                    job.message = "GPU 连续失败，已切换 CPU；详细原因已写入日志"
-                    callback(job)
-                    transcriber = FasterWhisperTranscriber(
-                        model="turbo", device="cpu", compute_type="int8"
-                    )
-                    transcriber.write_srt(job.source_path, destination, language="en")
+            remaining = [(job, path) for job, path in pending if not path.exists()]
+            if remaining:
+                series_callback("GPU 转写失败或超时，已自动切换 CPU")
+                self._write_gpu_error(gpu_error, gpu_error)
+                self._run_srt_process(
+                    remaining,
+                    "cpu",
+                    callback,
+                    series_callback,
+                    idle_timeout=3600,
+                )
+        for job, destination in pending:
+            if not destination.exists():
+                raise CleanCutError(f"SRT 未生成：{destination.name}")
             job.message = "SRT 完成，等待清水版"
             if job.state == JobState.ERROR:
                 job.state = JobState.PENDING
             manifest.save()
             callback(job)
+
+    def _run_srt_process(
+        self,
+        pending,
+        device: str,
+        callback,
+        series_callback,
+        *,
+        idle_timeout: int,
+    ) -> None:
+        with tempfile.TemporaryDirectory(prefix="clean-cut-asr-") as temporary:
+            work_dir = Path(temporary)
+            manifest_path = work_dir / "jobs.json"
+            status_path = work_dir / "status.json"
+            manifest_path.write_text(
+                json.dumps(
+                    {
+                        "status": str(status_path),
+                        "jobs": [
+                            {"source": str(job.source_path), "destination": str(destination)}
+                            for job, destination in pending
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            if getattr(sys, "frozen", False):
+                command = [sys.executable, "--asr-worker", str(manifest_path), device]
+            else:
+                command = [
+                    sys.executable,
+                    "-m",
+                    "clean_cut.desktop",
+                    "--asr-worker",
+                    str(manifest_path),
+                    device,
+                ]
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            )
+            last_status = ""
+            deadline = time.monotonic() + idle_timeout
+            while process.poll() is None:
+                if self._stop_event.is_set():
+                    process.terminate()
+                    try:
+                        process.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                    raise CleanCutError("用户已停止 SRT 任务。")
+                if status_path.is_file():
+                    try:
+                        status_text = status_path.read_text(encoding="utf-8")
+                        status = json.loads(status_text)
+                    except (OSError, json.JSONDecodeError):
+                        status = None
+                    if status and status_text != last_status:
+                        last_status = status_text
+                        deadline = time.monotonic() + idle_timeout
+                        index = int(status.get("index", 1))
+                        total = int(status.get("total", len(pending)))
+                        state = status.get("state")
+                        job, _destination = pending[min(max(index - 1, 0), len(pending) - 1)]
+                        if state == "running":
+                            job.message = f"生成 SRT（{index}/{total}，{device.upper()}）"
+                            series_callback(job.message)
+                            callback(job)
+                        elif state == "complete":
+                            job.message = f"SRT 已完成（{index}/{total}）"
+                            series_callback(job.message)
+                            callback(job)
+                if time.monotonic() >= deadline:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                    raise CleanCutError(
+                        f"{device.upper()} SRT 单集超过 {idle_timeout // 60} 分钟无进展"
+                    )
+                time.sleep(1)
+            stdout, stderr = process.communicate()
+            if process.returncode != 0:
+                detail = stderr.strip() or stdout.strip()
+                if status_path.is_file():
+                    try:
+                        detail = json.loads(status_path.read_text(encoding="utf-8")).get(
+                            "error", detail
+                        )
+                    except (OSError, json.JSONDecodeError):
+                        pass
+                raise CleanCutError(f"{device.upper()} SRT 进程失败：{detail[:1000]}")
 
     @staticmethod
     def _write_gpu_error(first_error: Exception, retry_error: Exception) -> None:
@@ -808,7 +907,62 @@ class CleanCutApp(tk.Tk):
         self.after(150, self._drain_events)
 
 
+def _asr_worker(manifest_path: Path, device: str) -> None:
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    status_path = Path(payload["status"])
+    jobs = payload["jobs"]
+    try:
+        transcriber = FasterWhisperTranscriber(
+            model="turbo",
+            device=device,
+            compute_type="float16" if device == "cuda" else "int8",
+        )
+        for index, item in enumerate(jobs, 1):
+            write_text_atomically(
+                status_path,
+                json.dumps(
+                    {
+                        "state": "running",
+                        "index": index,
+                        "total": len(jobs),
+                        "source": item["source"],
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+            destination = Path(item["destination"])
+            if not destination.exists():
+                transcriber.write_srt(
+                    Path(item["source"]), destination, language="en"
+                )
+            write_text_atomically(
+                status_path,
+                json.dumps(
+                    {
+                        "state": "complete",
+                        "index": index,
+                        "total": len(jobs),
+                        "source": item["source"],
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+    except Exception:
+        write_text_atomically(
+            status_path,
+            json.dumps(
+                {"state": "error", "error": traceback.format_exc()},
+                ensure_ascii=False,
+            ),
+        )
+        raise
+
+
 def main() -> None:
+    if "--asr-worker" in sys.argv:
+        worker_index = sys.argv.index("--asr-worker")
+        _asr_worker(Path(sys.argv[worker_index + 1]), sys.argv[worker_index + 2])
+        return
     if "--gpu-smoke-test" in sys.argv:
         source_index = sys.argv.index("--gpu-smoke-test") + 1
         log_path = Path(os.environ["LOCALAPPDATA"]) / "ProduceCleanCut" / "gpu-test.log"
